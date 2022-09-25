@@ -1975,7 +1975,45 @@ public:
           } else {
             VD->diagnose(diag::property_does_not_override, isClassContext)
                 .highlight(OA->getLocation());
+
+            // TODO: rephrase the opposite way
+            // If the override attempt is a no-args method that has
+            // the same name and produces the same result as a base
+            // class property, suggest to turn it into a computed property
+            auto propertyType = VD->getInterfaceType();
+
+            auto memberName = VD->createNameRef().withoutArgumentLabels();
+            auto inherited = DC->getSelfClassDecl()->getInherited();
+            if (!inherited.empty()) {
+              auto superclass = inherited.front().getType();
+              constraints::ConstraintSystem CS(DC, None);
+              constraints::MemberLookupResult lookupResult =
+                  CS.performMemberLookup(
+                      swift::constraints::ConstraintKind::ValueMember,
+                      memberName, superclass, FunctionRefKind::SingleApply,
+                      CS.getConstraintLocator({}), false);
+              for (auto can : lookupResult.ViableCandidates) {
+                auto canParameterListSize =
+                    getParameterList(can.getDecl())->size();
+                if (canParameterListSize == 0) {
+                  auto canType = can.getDecl()->getInterfaceType();
+
+                  if (auto fnTy = canType->getAs<AnyFunctionType>()) {
+                    if (auto resultFnTy =
+                            fnTy->getResult()->getAs<AnyFunctionType>()) {
+                      auto fnReturnType = resultFnTy->getResult();
+
+                      if (propertyType->isEqual(fnReturnType)) {
+                        // TODO: fixIt provide skeleton for the method
+                        VD->diagnose(diag::property_overriding_similar_method);
+                      }
+                    }
+                  }
+                }
+              }
+            }
           }
+
           OA->setInvalid();
         }
       }
@@ -2868,7 +2906,7 @@ public:
     (void) FD->getInterfaceType();
     (void) FD->getOperatorDecl();
     (void) FD->getDynamicallyReplacedDecl();
-    
+
     if (!isa<AccessorDecl>(FD)) {
       if (!FD->isInvalid()) {
         checkGenericParams(FD);
@@ -2900,7 +2938,33 @@ public:
           } else {
             FD->diagnose(diag::method_does_not_override, isClassContext)
                 .highlight(OA->getLocation());
+
+            // If the override attempt is a no-args method that has
+            // the same name and produces the same result as a base
+            // class property, suggest to turn it into a computed property
+            if (FD->getParameters()->size() == 0) {
+              auto returnType = FD->getResultInterfaceType()->getRValueType();
+              auto memberName = FD->createNameRef().withoutArgumentLabels();
+              auto inherited = DC->getSelfClassDecl()->getInherited();
+              if (!inherited.empty()) {
+                auto superclass = inherited.front().getType();
+                constraints::ConstraintSystem CS(DC, None);
+                constraints::MemberLookupResult lookupResult =
+                    CS.performMemberLookup(
+                        swift::constraints::ConstraintKind::ValueMember,
+                        memberName, superclass, FunctionRefKind::SingleApply,
+                        CS.getConstraintLocator({}), false);
+                for (auto can : lookupResult.ViableCandidates) {
+                  auto canType = can.getDecl()->getInterfaceType();
+                  if (returnType->isEqual(canType)) {
+                    // TODO: fixIt provide skeleton for the computed property
+                    FD->diagnose(diag::method_overriding_similar_property);
+                  }
+                }
+              }
+            }
           }
+
           OA->setInvalid();
         }
       }
