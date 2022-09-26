@@ -948,6 +948,22 @@ fillSymbolInfo(CursorSymbolInfo &Symbol, const DeclInfo &DInfo,
   }
   Symbol.TypeName = copyAndClearString(Allocator, Buffer);
 
+  // ParameterizedProtocolType should always be wrapped in ExistentialType and
+  // cannot be mangled on its own.
+  // But ParameterizedProtocolType can currently occur in 'typealias'
+  // declarations. rdar://99176683
+  // To avoid crashing in USR generation, return an error for now.
+  if (auto Ty = DInfo.VD->getInterfaceType()) {
+    while (auto MetaTy = Ty->getAs<MetatypeType>()) {
+      Ty = MetaTy->getInstanceType();
+    }
+    if (Ty && Ty->getCanonicalType()->is<ParameterizedProtocolType>()) {
+      return llvm::createStringError(
+          llvm::inconvertibleErrorCode(),
+          "Cannot mangle USR for ParameterizedProtocolType without 'any'.");
+    }
+  }
+
   SwiftLangSupport::printDeclTypeUSR(DInfo.VD, OS);
   Symbol.TypeUSR = copyAndClearString(Allocator, Buffer);
 
@@ -988,7 +1004,8 @@ fillSymbolInfo(CursorSymbolInfo &Symbol, const DeclInfo &DInfo,
         /*PrintMessages=*/false,
         /*SkipInheritedDocs=*/false,
         /*IncludeSPISymbols=*/true,
-        /*IncludeClangDocs=*/true
+        /*IncludeClangDocs=*/true,
+        /*EmitExtensionBlockSymbols=*/false,
     };
 
     symbolgraphgen::printSymbolGraphForDecl(DInfo.VD, DInfo.BaseType,
@@ -1270,7 +1287,7 @@ static bool passNameInfoForDecl(ResolvedCursorInfo CursorInfo,
   auto *VD = CursorInfo.ValueD;
 
   // If the given name is not a function name, and the cursor points to
-  // a contructor call, we use the type declaration instead of the init
+  // a constructor call, we use the type declaration instead of the init
   // declaration to translate the name.
   if (Info.ArgNames.empty() && !Info.IsZeroArgSelector) {
     if (auto *TD = CursorInfo.CtorTyRef) {
@@ -1620,6 +1637,10 @@ static void computeDiagnostics(
       auto &DiagConsumer = AstUnit->getEditorDiagConsumer();
       auto Diagnostics = DiagConsumer.getDiagnosticsForBuffer(BufferID);
       Receiver(RequestResult<DiagnosticsResult>::fromResult(Diagnostics));
+    }
+
+    void cancelled() override {
+      Receiver(RequestResult<DiagnosticsResult>::cancelled());
     }
   };
 
@@ -2195,7 +2216,7 @@ public:
       //     print(x)
       Dcl = V->getCanonicalVarDecl();
 
-      // If we have a prioperty wrapper backing property or projected value, use
+      // If we have a property wrapper backing property or projected value, use
       // the wrapped property instead (i.e. if this is _foo or $foo, pretend
       // it's foo).
       if (auto *Wrapped = V->getOriginalWrappedProperty()) {
@@ -2263,7 +2284,7 @@ private:
     if (auto *V = dyn_cast<VarDecl>(D)) {
       D = V->getCanonicalVarDecl();
 
-      // If we have a prioperty wrapper backing property or projected value, use
+      // If we have a property wrapper backing property or projected value, use
       // the wrapped property for comparison instead (i.e. if this is _foo or
       // $foo, pretend it's foo).
       if (auto *Wrapped = V->getOriginalWrappedProperty()) {

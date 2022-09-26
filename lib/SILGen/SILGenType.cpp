@@ -707,10 +707,6 @@ SILFunction *SILGenModule::emitProtocolWitness(
        !requirement.getFuncDecl()->isDistributed() &&
        witnessRef.hasDecl() && witnessRef.getFuncDecl() &&
        witnessRef.getFuncDecl()->isDistributed());
-  // We only need to use thunks when we go cross-actor:
-  shouldUseDistributedThunkWitness = shouldUseDistributedThunkWitness &&
-                                     getActorIsolation(requirement.getDecl()) !=
-                                         getActorIsolation(witness.getDecl());
   if (shouldUseDistributedThunkWitness) {
     auto thunkDeclRef = SILDeclRef(
         witnessRef.getFuncDecl()->getDistributedThunk(),
@@ -732,7 +728,7 @@ SILFunction *SILGenModule::emitProtocolWitness(
   // The type of the witness thunk.
   auto reqtSubstTy = cast<AnyFunctionType>(
     reqtOrigTy->substGenericArgs(reqtSubMap)
-      ->getCanonicalType(genericSig));
+      ->getReducedType(genericSig));
 
   // Generic signatures where all parameters are concrete are lowered away
   // at the SILFunctionType level.
@@ -1145,9 +1141,17 @@ public:
         !isa<ProtocolDecl>(cd->getDeclContext()))
       SGM.emitObjCConstructorThunk(cd);
   }
+
   void visitDestructorDecl(DestructorDecl *dd) {
-    assert(isa<ClassDecl>(theType) && "destructor in a non-class type");
-    SGM.emitDestructor(cast<ClassDecl>(theType), dd);
+    if (auto *cd = dyn_cast<ClassDecl>(theType))
+      return SGM.emitDestructor(cast<ClassDecl>(theType), dd);
+    if (auto *nom = dyn_cast<NominalTypeDecl>(theType)) {
+      if (nom->isMoveOnly()) {
+        return SGM.emitMoveOnlyDestructor(nom, dd);
+      }
+    }
+    assert(isa<ClassDecl>(theType) &&
+           "destructor in a non-class, non-moveonly type");
   }
 
   void visitEnumCaseDecl(EnumCaseDecl *ecd) {}

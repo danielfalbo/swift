@@ -106,6 +106,7 @@ set(SWIFT_BENCH_MODULES
     single-source/Integrate
     single-source/IterateData
     single-source/Join
+    single-source/KeyPathPerformanceTests
     single-source/LazyFilter
     single-source/LinkedList
     single-source/LuhnAlgoEager
@@ -161,6 +162,7 @@ set(SWIFT_BENCH_MODULES
     single-source/RomanNumbers
     single-source/SIMDRandomMask
     single-source/SIMDReduceInteger
+    single-source/SimpleArraySpecialization
     single-source/SequenceAlgos
     single-source/SetTests
     single-source/SevenBoom
@@ -214,6 +216,7 @@ endif()
 
 set(BENCH_LIBRARY_MODULES
     utils/TestsUtils
+    utils/SimpleArray
 )
 
 set(BENCH_DRIVER_LIBRARY_MODULES

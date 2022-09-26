@@ -85,6 +85,7 @@
 #include "llvm/Transforms/Instrumentation/SanitizerCoverage.h"
 #include "llvm/Transforms/Instrumentation/ThreadSanitizer.h"
 #include "llvm/Transforms/ObjCARC.h"
+#include "llvm/Transforms/Scalar.h"
 
 #include <thread>
 
@@ -244,6 +245,20 @@ performOptimizationsUsingLegacyPassManger(const IRGenOptions &Opts,
   // Set up a pipeline.
   PassManagerBuilderWrapper PMBuilder(Opts);
 
+  // If we're generating a profile, add the lowering pass now.
+  if (Opts.GenerateProfile) {
+    // TODO: Surface the option to emit atomic profile counter increments at
+    // the driver level.
+    // Configure the module passes.
+    legacy::PassManager ModulePasses;
+    ModulePasses.add(createTargetTransformInfoWrapperPass(
+        TargetMachine->getTargetIRAnalysis()));
+    InstrProfOptions Options;
+    Options.Atomic = bool(Opts.Sanitizers & SanitizerKind::Thread);
+    ModulePasses.add(createInstrProfilingLegacyPass(Options));
+    ModulePasses.run(*Module);
+  }
+
   if (Opts.shouldOptimize() && !Opts.DisableLLVMOptzns) {
     PMBuilder.OptLevel = 2; // -Os
     PMBuilder.SizeLevel = 1; // -Os
@@ -353,15 +368,6 @@ performOptimizationsUsingLegacyPassManger(const IRGenOptions &Opts,
   legacy::PassManager ModulePasses;
   ModulePasses.add(createTargetTransformInfoWrapperPass(
       TargetMachine->getTargetIRAnalysis()));
-
-  // If we're generating a profile, add the lowering pass now.
-  if (Opts.GenerateProfile) {
-    // TODO: Surface the option to emit atomic profile counter increments at
-    // the driver level.
-    InstrProfOptions Options;
-    Options.Atomic = bool(Opts.Sanitizers & SanitizerKind::Thread);
-    ModulePasses.add(createInstrProfilingLegacyPass(Options));
-  }
 
   PMBuilder.populateModulePassManager(ModulePasses);
 
@@ -484,21 +490,17 @@ performOptimizationsUsingNewPassManger(const IRGenOptions &Opts,
   if (Opts.Sanitizers & SanitizerKind::Address) {
     PB.registerOptimizerLastEPCallback([&](ModulePassManager &MPM,
                                            OptimizationLevel Level) {
-      auto Recover = bool(Opts.SanitizersWithRecoveryInstrumentation &
-                          SanitizerKind::Address);
-      bool UseAfterScope = false;
-      bool ModuleUseAfterScope = true;
-      bool UseOdrIndicator = Opts.SanitizeAddressUseODRIndicator;
-      llvm::AsanDtorKind DestructorKind = llvm::AsanDtorKind::Global;
-      llvm::AsanDetectStackUseAfterReturnMode UseAfterReturn =
-          llvm::AsanDetectStackUseAfterReturnMode::Runtime;
+      AddressSanitizerOptions ASOpts;
+      ASOpts.CompileKernel = false;
+      ASOpts.Recover = bool(Opts.SanitizersWithRecoveryInstrumentation &
+                            SanitizerKind::Address);
+      ASOpts.UseAfterScope = false;
+      ASOpts.UseAfterReturn = llvm::AsanDetectStackUseAfterReturnMode::Runtime;
       MPM.addPass(
           RequireAnalysisPass<ASanGlobalsMetadataAnalysis, llvm::Module>());
-      MPM.addPass(ModuleAddressSanitizerPass(false, Recover,
-                                             ModuleUseAfterScope,
-                                             UseOdrIndicator, DestructorKind));
-      MPM.addPass(createModuleToFunctionPassAdaptor(AddressSanitizerPass(
-          {false, Recover, UseAfterScope, UseAfterReturn})));
+      MPM.addPass(ModuleAddressSanitizerPass(
+          ASOpts, /*UseGlobalGC=*/true, Opts.SanitizeAddressUseODRIndicator,
+          /*DestructorKind=*/llvm::AsanDtorKind::Global));
     });
   }
 
@@ -808,10 +810,29 @@ bool swift::compileAndWriteLLVM(llvm::Module *module,
     EmitPasses.add(createPrintModulePass(out));
     break;
   case IRGenOutputKind::LLVMBitcode: {
+    // Emit a module summary by default for Regular LTO except ld64-based ones
+    // (which use the legacy LTO API).
+    bool EmitRegularLTOSummary =
+        targetMachine->getTargetTriple().getVendor() != llvm::Triple::Apple;
+
+    if (EmitRegularLTOSummary || opts.LLVMLTOKind == IRGenLLVMLTOKind::Thin) {
+      // Rename anon globals to be able to export them in the summary.
+      EmitPasses.add(createNameAnonGlobalPass());
+    }
+
     if (opts.LLVMLTOKind == IRGenLLVMLTOKind::Thin) {
       EmitPasses.add(createWriteThinLTOBitcodePass(out));
     } else {
-      EmitPasses.add(createBitcodeWriterPass(out));
+      if (EmitRegularLTOSummary) {
+        module->addModuleFlag(llvm::Module::Error, "ThinLTO", uint32_t(0));
+        // Assume other sources are compiled with -fsplit-lto-unit (it's enabled
+        // by default when -flto is specified on platforms that support regular
+        // lto summary.)
+        module->addModuleFlag(llvm::Module::Error, "EnableSplitLTOUnit",
+                              uint32_t(1));
+      }
+      EmitPasses.add(createBitcodeWriterPass(
+          out, /*ShouldPreserveUseListOrder*/ false, EmitRegularLTOSummary));
     }
     break;
   }
@@ -978,6 +999,18 @@ static void setPointerAuthOptions(PointerAuthOptions &opts,
                         Discrimination::Constant,
                         SpecialPointerAuthDiscriminators
                           ::NonUniqueExtendedExistentialTypeShape);
+
+  opts.ClangTypeTaskContinuationFunction = PointerAuthSchema(
+      codeKey, /*address*/ false, Discrimination::Constant,
+      SpecialPointerAuthDiscriminators::ClangTypeTaskContinuationFunction);
+
+  opts.GetExtraInhabitantTagFunction = PointerAuthSchema(
+      codeKey, /*address*/ false, Discrimination::Constant,
+      SpecialPointerAuthDiscriminators::GetExtraInhabitantTagFunction);
+
+  opts.StoreExtraInhabitantTagFunction = PointerAuthSchema(
+      codeKey, /*address*/ false, Discrimination::Constant,
+      SpecialPointerAuthDiscriminators::StoreExtraInhabitantTagFunction);
 }
 
 std::unique_ptr<llvm::TargetMachine>
@@ -1333,6 +1366,11 @@ GeneratedModule IRGenRequest::evaluate(Evaluator &evaluator,
       irgen.emitDynamicReplacements();
     }
 
+    // Emit coverage mapping info. This needs to happen after we've emitted
+    // any lazy definitions, as we need to know whether or not we emitted a
+    // profiler increment for a given coverage map.
+    IGM.emitCoverageMapping();
+
     // Emit symbols for eliminated dead methods.
     IGM.emitVTableStubs();
 
@@ -1583,6 +1621,11 @@ static void performParallelIRGeneration(IRGenDescriptor desc) {
   // Emit reflection metadata for builtin and imported types.
   irgen.emitBuiltinReflectionMetadata();
 
+  // Emit coverage mapping info. This needs to happen after we've emitted
+  // any lazy definitions, as we need to know whether or not we emitted a
+  // profiler increment for a given coverage map.
+  irgen.emitCoverageMapping();
+
   IRGenModule *PrimaryGM = irgen.getPrimaryIGM();
 
   // Emit symbols for eliminated dead methods.
@@ -1753,7 +1796,9 @@ swift::createSwiftModuleObjectFile(SILModule &SILMod, StringRef Buffer,
                                           Data, "__Swift_AST");
   std::string Section;
   switch (IGM.TargetInfo.OutputObjectFormat) {
+  case llvm::Triple::DXContainer:
   case llvm::Triple::GOFF:
+  case llvm::Triple::SPIRV:
   case llvm::Triple::UnknownObjectFormat:
     llvm_unreachable("unknown object format");
   case llvm::Triple::XCOFF:

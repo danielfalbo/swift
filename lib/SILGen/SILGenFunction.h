@@ -634,6 +634,7 @@ public:
   void emitFunction(FuncDecl *fd);
   /// Emits code for a ClosureExpr.
   void emitClosure(AbstractClosureExpr *ce);
+
   /// Generates code for a class destroying destructor. This
   /// emits the body code from the DestructorDecl, calls the base class
   /// destructor, then implicitly releases the elements of the class.
@@ -646,10 +647,18 @@ public:
   /// Generate code into @main for starting the async main on the main thread.
   void emitAsyncMainThreadStart(SILDeclRef entryPoint);
 
+  /// Generates code for class/move only deallocating destructor. This calls the
+  /// destroying destructor and then deallocates 'self'.
+  void emitDeallocatingDestructor(DestructorDecl *dd);
+
   /// Generates code for a class deallocating destructor. This
   /// calls the destroying destructor and then deallocates 'self'.
-  void emitDeallocatingDestructor(DestructorDecl *dd);
-  
+  void emitDeallocatingClassDestructor(DestructorDecl *dd);
+
+  /// Generates code for the deinit of the move only type and destroys all of
+  /// the fields.
+  void emitDeallocatingMoveOnlyDestructor(DestructorDecl *dd);
+
   /// Generates code for a struct constructor.
   /// This allocates the new 'self' value, emits the
   /// body code, then returns the final initialized 'self'.
@@ -691,6 +700,18 @@ public:
   void emitClassMemberDestruction(ManagedValue selfValue, ClassDecl *cd,
                                   CleanupLocation cleanupLoc,
                                   SILBasicBlock* finishBB);
+
+  /// Generates code to destroy the instance variables of a move only non-class
+  /// nominal type.
+  ///
+  /// \param selfValue The 'self' value.
+  /// \param nd The nominal declaration whose members are being destroyed.
+  /// \param finishBB If set, used as the basic block after members have been
+  ///                 destroyed, and we're ready to perform final cleanups
+  ///                 before returning.
+  void emitMoveOnlyMemberDestruction(SILValue selfValue, NominalTypeDecl *nd,
+                                     CleanupLocation cleanupLoc,
+                                     SILBasicBlock *finishBB);
 
   /// Generates code to destroy linearly recursive data structures, without
   /// building up the call stack.
@@ -1451,7 +1472,7 @@ public:
       bool isDirectAccessorUse,
       PreparedArguments &&optionalSubscripts, SGFContext C,
       bool isOnSelfParameter,
-      Optional<ImplicitActorHopTarget> implicitActorHopTarget = None);
+      Optional<ActorIsolation> implicitActorHopTarget = None);
 
   void emitSetAccessor(SILLocation loc, SILDeclRef setter,
                        SubstitutionMap substitutions,
@@ -1543,6 +1564,10 @@ public:
   ManagedValue
   emitFormalEvaluationManagedBeginBorrow(SILLocation loc, SILValue v,
                                          const TypeLowering &lowering);
+
+  ManagedValue emitFormalEvaluationManagedStoreBorrow(SILLocation loc,
+                                                      SILValue v,
+                                                      SILValue addr);
 
   ManagedValue emitManagedRValueWithCleanup(SILValue v);
   ManagedValue emitManagedRValueWithCleanup(SILValue v,
@@ -1680,7 +1705,7 @@ public:
                    ArrayRef<ManagedValue> args,
                    const CalleeTypeInfo &calleeTypeInfo, ApplyOptions options,
                    SGFContext evalContext, 
-                   Optional<ImplicitActorHopTarget> implicitActorHopTarget);
+                   Optional<ActorIsolation> implicitActorHopTarget);
 
   RValue emitApplyOfDefaultArgGenerator(SILLocation loc,
                                         ConcreteDeclRef defaultArgsOwner,

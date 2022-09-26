@@ -398,7 +398,8 @@ bool SILCombiner::tryOptimizeKeypathOffsetOf(ApplyInst *AI,
     SILType ptrType = SILType::getRawPointerType(Builder.getASTContext());
     SILValue offsetPtr;
     projector->project(KeyPathProjector::AccessType::Get, [&](SILValue addr) {
-      offsetPtr = Builder.createAddressToPointer(loc, addr, ptrType);
+      offsetPtr = Builder.createAddressToPointer(loc, addr, ptrType,
+                                          /*needsStackProtection=*/ false);
     });
 
     // The result of the _storedInlineOffset call should be Optional<Int>. If
@@ -1017,10 +1018,10 @@ struct ConcreteArgumentCopy {
       return None;
 
     SILValue origArg = apply.getArgument(argIdx);
-    // FIXME_opaque: With SIL opaque values, a formally indirect argument may be
-    // passed as a SIL object. In this case, generate a copy_value for the new
-    // argument and a destroy_value for the old argument, as should also be done
-    // for owned references.
+    // TODO_sil_opaque: With SIL opaque values, a formally indirect argument
+    // may be passed as a SIL object. In this case, generate a copy_value for
+    // the new argument and a destroy_value for the old argument, as should
+    // also be done for owned references.
     assert(origArg->getType().isAddress() == paramInfo.isFormalIndirect());
 
     // If argument convention is direct, then the existential reference was

@@ -20,9 +20,11 @@
 
 #include "swift/AST/SILLayout.h"
 #include "swift/AST/Types.h"
+#include "swift/SIL/AbstractionPattern.h"
+#include "swift/SIL/Lifetime.h"
+#include "llvm/ADT/Hashing.h"
 #include "llvm/ADT/PointerIntPair.h"
 #include "llvm/Support/ErrorHandling.h"
-#include "llvm/ADT/Hashing.h"
 
 namespace swift {
 
@@ -200,8 +202,7 @@ public:
 
 public:
   // FIXME -- Temporary until LLDB adopts getASTType()
-  LLVM_ATTRIBUTE_DEPRECATED(CanType getSwiftRValueType() const,
-                            "Please use getASTType()") {
+  [[deprecated("Please use getASTType()")]] CanType getSwiftRValueType() const {
     return getASTType();
   }
 
@@ -230,6 +231,13 @@ public:
 
   bool isVoid() const {
     return value.getPointer()->isVoid();
+  }
+
+  /// Whether the type is an enum, struct, or tuple.
+  bool isAggregate() {
+    return is<TupleType>() || is<StructType>() ||
+           is<BoundGenericStructType>() || is<EnumType>() ||
+           is<BoundGenericEnumType>();
   }
 
   /// Retrieve the ClassDecl for a type that maps to a Swift class or
@@ -351,6 +359,15 @@ public:
   bool hasReferenceSemantics() const {
     return getASTType().hasReferenceSemantics();
   }
+
+  /// The lifetime of values of this type (which are not otherwise annotated).
+  ///
+  /// Trivial types are ::None.
+  /// Non-trivial types are ::Lexical by default.
+  /// Non-trivial types which are annotated @_eagerMove are ::EagerMove.
+  /// Aggregates which consist entirely of ::EagerMove fields are ::EagerMove.
+  /// All other types are ::Lexical.
+  Lifetime getLifetime(const SILFunction &F) const;
 
   /// Returns true if the referenced type is any sort of class-reference type,
   /// meaning anything with reference semantics that is not a function type.
@@ -604,6 +621,10 @@ public:
   /// Returns true if this type is a first class move only type or a move only
   /// wrapped type.
   bool isMoveOnly() const;
+
+  /// Returns true if and only if this type is a first class move only
+  /// type. NOTE: Returns false if the type is a move only wrapped type.
+  bool isMoveOnlyType() const;
 
   /// Returns true if this SILType is a move only wrapper type.
   ///

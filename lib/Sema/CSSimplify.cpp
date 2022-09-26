@@ -530,7 +530,8 @@ static bool matchCallArgumentsImpl(
     }
 
     // Handle variadic parameters.
-    if (param.isVariadic()) {
+    if (param.isVariadic() ||
+        param.getPlainType()->is<PackExpansionType>()) {
       // Claim the next argument with the name of this parameter.
       auto claimed =
           claimNextNamed(nextArgIdx, paramLabel, ignoreNameMismatch);
@@ -546,7 +547,8 @@ static bool matchCallArgumentsImpl(
 
       // If the argument is itself variadic, we're forwarding varargs
       // with a VarargExpansionExpr; don't collect any more arguments.
-      if (args[*claimed].isVariadic()) {
+      if (args[*claimed].isVariadic() ||
+          args[*claimed].getPlainType()->is<PackExpansionType>()) {
         return;
       }
 
@@ -796,7 +798,8 @@ static bool matchCallArgumentsImpl(
       const auto &param = params[paramIdx];
 
       // Variadic parameters can be unfulfilled.
-      if (param.isVariadic())
+      if (param.isVariadic() ||
+          param.getPlainType()->is<PackExpansionType>())
         continue;
 
       // Parameters with defaults can be unfulfilled.
@@ -885,7 +888,9 @@ static bool matchCallArgumentsImpl(
           continue;
 
         // Does nothing for variadic tail.
-        if (params[paramIdx].isVariadic() && paramBindIdx > 0) {
+        if ((params[paramIdx].isVariadic() ||
+             params[paramIdx].getPlainType()->is<PackExpansionType>()) &&
+            paramBindIdx > 0) {
           assert(args[fromArgIdx].getLabel().empty());
           continue;
         }
@@ -1576,7 +1581,7 @@ shouldOpenExistentialCallArgument(
     return None;
 
   // If the parameter is non-generic variadic, don't open.
-  if (param->isVariadic() && !param->getVarargBaseTy()->hasTypeSequence())
+  if (param->isVariadic())
     return None;
 
   // Look through an inout type on the formal type of the parameter.
@@ -2134,9 +2139,6 @@ ConstraintSystem::matchTupleTypes(TupleType *tuple1, TupleType *tuple2,
                                   ConstraintLocatorBuilder locator) {
   TypeMatchOptions subflags = getDefaultDecompositionOptions(flags);
 
-  // FIXME: Remove varargs logic below once we're no longer comparing
-  // argument lists in CSRanking.
-
   // Equality and subtyping have fairly strict requirements on tuple matching,
   // requiring element names to either match up or be disjoint.
   if (kind < ConstraintKind::Conversion) {
@@ -2199,10 +2201,6 @@ ConstraintSystem::matchTupleTypes(TupleType *tuple1, TupleType *tuple2,
         }
       }
 
-      // Variadic bit must match.
-      if (elt1.isVararg() != elt2.isVararg())
-        return getTypeMatchFailure(locator);
-
       // Compare the element types.
       auto result = matchTypes(elt1.getType(), elt2.getType(), kind, subflags,
                                locator.withPathElement(
@@ -2254,6 +2252,7 @@ ConstraintSystem::matchTupleTypes(TupleType *tuple1, TupleType *tuple2,
   case ConstraintKind::SelfObjectOfProtocol:
   case ConstraintKind::UnresolvedValueMember:
   case ConstraintKind::ValueMember:
+  case ConstraintKind::ValueWitness:
   case ConstraintKind::BridgingConversion:
   case ConstraintKind::OneWayEqual:
   case ConstraintKind::OneWayBindParam:
@@ -2417,6 +2416,7 @@ static bool matchFunctionRepresentations(FunctionType::ExtInfo einfo1,
   case ConstraintKind::SelfObjectOfProtocol:
   case ConstraintKind::UnresolvedValueMember:
   case ConstraintKind::ValueMember:
+  case ConstraintKind::ValueWitness:
   case ConstraintKind::OneWayEqual:
   case ConstraintKind::OneWayBindParam:
   case ConstraintKind::DefaultClosureType:
@@ -2439,8 +2439,9 @@ static bool isSingleTupleParam(ASTContext &ctx,
     return false;
 
   const auto &param = params.front();
-  if (param.isVariadic() || param.isInOut() || param.hasLabel() ||
-      param.isIsolated())
+  if ((param.isVariadic() ||
+       param.getPlainType()->is<PackExpansionType>()) ||
+      param.isInOut() || param.hasLabel() || param.isIsolated())
     return false;
 
   auto paramType = param.getPlainType();
@@ -2581,10 +2582,8 @@ static bool fixMissingArguments(ConstraintSystem &cs, ASTNode anchor,
     // has a single parameter of type `(Int, Int) -> Void`.
     if (auto *tuple = argType->getAs<TupleType>()) {
       args.pop_back();
-      for (const auto &elt : tuple->getElements()) {
-        args.push_back(AnyFunctionType::Param(elt.getType(), elt.getName(),
-                                              elt.getParameterFlags()));
-      }
+      for (const auto &elt : tuple->getElements())
+        args.emplace_back(elt.getType(), elt.getName());
     } else if (auto *typeVar = argType->getAs<TypeVariableType>()) {
       auto isParam = [](const Expr *expr) {
         if (auto *DRE = dyn_cast<DeclRefExpr>(expr)) {
@@ -2650,8 +2649,12 @@ static bool fixMissingArguments(ConstraintSystem &cs, ASTNode anchor,
   // If the argument was a single "tuple", let's bind newly
   // synthesized arguments to it.
   if (argumentTuple) {
+    // We can ignore parameter flags here as we're imploding a tuple for a
+    // simulated ((X, Y, Z)) -> R to (X, Y, Z) -> R conversion. As such, this is
+    // similar to e.g { x, y, z in fn((x, y, z)) }.
     cs.addConstraint(ConstraintKind::Bind, *argumentTuple,
-                     FunctionType::composeTuple(ctx, args),
+                     FunctionType::composeTuple(
+                         ctx, args, ParameterFlagHandling::IgnoreNonEmpty),
                      cs.getConstraintLocator(anchor));
   }
 
@@ -2826,6 +2829,7 @@ ConstraintSystem::matchFunctionTypes(FunctionType *func1, FunctionType *func2,
   case ConstraintKind::SelfObjectOfProtocol:
   case ConstraintKind::UnresolvedValueMember:
   case ConstraintKind::ValueMember:
+  case ConstraintKind::ValueWitness:
   case ConstraintKind::BridgingConversion:
   case ConstraintKind::OneWayEqual:
   case ConstraintKind::OneWayBindParam:
@@ -2884,8 +2888,8 @@ ConstraintSystem::matchFunctionTypes(FunctionType *func1, FunctionType *func2,
     // Form an imploded tuple type, dropping the parameter flags as although
     // canImplodeParams makes sure we're not dealing with vargs, inout, etc,
     // we may still have e.g ownership flags left over, which we can drop.
-    auto input = AnyFunctionType::composeTuple(getASTContext(), params,
-                                               /*wantParamFlags*/ false);
+    auto input = AnyFunctionType::composeTuple(
+        getASTContext(), params, ParameterFlagHandling::IgnoreNonEmpty);
     params.clear();
     // If fixes are disabled let's do an easy thing and implode
     // tuple directly into parameters list.
@@ -3291,7 +3295,41 @@ ConstraintSystem::matchDeepEqualityTypes(Type type1, Type type2,
   }
 
   // Handle existential types.
-  if (type1->isExistentialType() && type2->isExistentialType()) {
+  if (auto *existential1 = type1->getAs<ExistentialType>()) {
+    auto existential2 = type2->castTo<ExistentialType>();
+
+    auto result = matchTypes(existential1->getConstraintType(),
+                             existential2->getConstraintType(),
+                             ConstraintKind::Bind, subflags,
+                             locator.withPathElement(
+                               ConstraintLocator::ExistentialConstraintType));
+
+    if (result.isFailure())
+      return result;
+
+    return getTypeMatchSuccess();
+  }
+
+  // Arguments of parameterized protocol types have to match on the nose.
+  if (auto ppt1 = type1->getAs<ParameterizedProtocolType>()) {
+    auto ppt2 = type2->castTo<ParameterizedProtocolType>();
+
+    auto result = matchTypes(ppt1->getBaseType(),
+                             ppt2->getBaseType(),
+                             ConstraintKind::Bind, subflags,
+                             locator.withPathElement(
+                               ConstraintLocator::ParentType));
+
+    if (result.isFailure())
+      return result;
+
+    return matchDeepTypeArguments(*this, subflags,
+                                  ppt1->getArgs(),
+                                  ppt2->getArgs(),
+                                  locator);
+  }
+
+  if (type1->isExistentialType()) {
     auto layout1 = type1->getExistentialLayout();
     auto layout2 = type2->getExistentialLayout();
 
@@ -3314,22 +3352,14 @@ ConstraintSystem::matchDeepEqualityTypes(Type type1, Type type2,
       if (!layout1.explicitSuperclass || !layout2.explicitSuperclass)
         return getTypeMatchFailure(locator);
 
+      auto subLocator = locator.withPathElement(
+                          ConstraintLocator::ProtocolCompositionSuperclassType);
       auto result = matchTypes(layout1.explicitSuperclass,
                                layout2.explicitSuperclass,
                                ConstraintKind::Bind, subflags,
-                               locator.withPathElement(
-                                 ConstraintLocator::ExistentialSuperclassType));
+                               subLocator);
       if (result.isFailure())
         return result;
-    }
-
-    // Arguments of parameterized protocol types have to match on the nose.
-    if (auto ppt1 = type1->getAs<ParameterizedProtocolType>()) {
-      auto ppt2 = type2->castTo<ParameterizedProtocolType>();
-      return matchDeepTypeArguments(*this, subflags,
-                                    ppt1->getArgs(),
-                                    ppt2->getArgs(),
-                                    locator);
     }
 
     return getTypeMatchSuccess();
@@ -3793,6 +3823,13 @@ ConstraintSystem::matchTypesBindTypeVar(
       // let's ignore this mismatch and mark affected type variable as a hole
       // because something else has to be fixed already for this to happen.
       if (type->is<DependentMemberType>() && !type->hasTypeVariable()) {
+        // Since the binding couldn't be performed, the type variable is a
+        // hole regardless whether it would be bound later to some other
+        // type or not. If this is not reflected in constraint system
+        // it would let the solver to form a _valid_ solution as if the
+        // constraint between the type variable and the unresolved dependent
+        // member type never existed.
+        increaseScore(SK_Hole);
         recordPotentialHole(typeVar);
         return getTypeMatchSuccess();
       }
@@ -3951,6 +3988,9 @@ static ConstraintFix *fixRequirementFailure(ConstraintSystem &cs, Type type1,
   auto *reqLoc = cs.getConstraintLocator(anchor, path);
 
   switch (req.getRequirementKind()) {
+  case RequirementKind::SameCount:
+    llvm_unreachable("Same-count requirement not supported here");
+
   case RequirementKind::SameType: {
     return SkipSameTypeRequirement::create(cs, type1, type2, reqLoc);
   }
@@ -6066,6 +6106,7 @@ ConstraintSystem::matchTypes(Type type1, Type type2, ConstraintKind kind,
     case ConstraintKind::SelfObjectOfProtocol:
     case ConstraintKind::UnresolvedValueMember:
     case ConstraintKind::ValueMember:
+    case ConstraintKind::ValueWitness:
     case ConstraintKind::OneWayEqual:
     case ConstraintKind::OneWayBindParam:
     case ConstraintKind::DefaultClosureType:
@@ -6101,6 +6142,11 @@ ConstraintSystem::matchTypes(Type type1, Type type2, ConstraintKind kind,
 #include "swift/AST/TypeNodes.def"
       llvm_unreachable("artificial type in constraint");
 
+    case TypeKind::BuiltinTuple:
+      llvm_unreachable("BuiltinTupleType in constraint");
+
+    // Note: Mismatched builtin types fall through to the TypeKind::Error
+    // case below.
 #define BUILTIN_TYPE(id, parent) case TypeKind::id:
 #define TYPE(id, parent)
 #include "swift/AST/TypeNodes.def"
@@ -6372,7 +6418,8 @@ ConstraintSystem::matchTypes(Type type1, Type type2, ConstraintKind kind,
         // If we are matching types for equality, we might still have
         // type variables inside the protocol composition's superclass
         // constraint.
-        conversionsOrFixes.push_back(ConversionRestrictionKind::DeepEquality);
+        if (desugar1->getKind() == desugar2->getKind())
+          conversionsOrFixes.push_back(ConversionRestrictionKind::DeepEquality);
         break;
 
       default:
@@ -6953,6 +7000,9 @@ ConstraintSystem::simplifyConstructionConstraint(
 #define TYPE(id, parent)
 #include "swift/AST/TypeNodes.def"
       llvm_unreachable("artificial type in constraint");
+
+  case TypeKind::BuiltinTuple:
+    llvm_unreachable("BuiltinTupleType in constraint");
     
   case TypeKind::Unresolved:
   case TypeKind::Error:
@@ -6983,10 +7033,36 @@ ConstraintSystem::simplifyConstructionConstraint(
         fnType = contextualType;
       }
     }
+    SmallVector<AnyFunctionType::Param, 4> args;
+    for (auto idx : indices(fnType->getParams())) {
+      auto &arg = fnType->getParams()[idx];
 
-    // Tuple construction is simply tuple conversion.
-    Type argType = AnyFunctionType::composeTuple(getASTContext(),
-                                                 fnType->getParams());
+      // We can disregard '_const', it's not applicable for tuple construction.
+      auto flags = arg.getParameterFlags().withCompileTimeConst(false);
+
+      // We cannot handle inout for tuple construction.
+      if (flags.isInOut()) {
+        if (!shouldAttemptFixes())
+          return SolutionKind::Error;
+
+        auto *argLoc = getConstraintLocator(locator, {
+          LocatorPathElt::ApplyArgument(),
+          LocatorPathElt::ApplyArgToParam(idx, idx, ParameterTypeFlags())
+        });
+        auto argTy = arg.getParameterType();
+        if (recordFix(RemoveAddressOf::create(*this, argTy, argTy, argLoc)))
+          return SolutionKind::Error;
+
+        flags = flags.withInOut(false);
+      }
+      args.push_back(arg.withFlags(flags));
+    }
+
+    // Tuple construction is simply tuple conversion. We should have already
+    // handled the parameter flags. If any future parameter flags are added,
+    // they should also be verified above.
+    Type argType = AnyFunctionType::composeTuple(
+        getASTContext(), args, ParameterFlagHandling::AssertEmpty);
     Type resultType = fnType->getResult();
 
     ConstraintLocatorBuilder builder(locator);
@@ -7307,7 +7383,11 @@ ConstraintSystem::SolutionKind ConstraintSystem::simplifyConformsToConstraint(
             TypeChecker::conformsToProtocol(rawValue, protocol,
                                             DC->getParentModule())) {
           auto *fix = UseRawValue::create(*this, type, protocolTy, loc);
-          return recordFix(fix) ? SolutionKind::Error : SolutionKind::Solved;
+          // Since this is a conformance requirement failure (where the
+          // source is most likely an argument), let's increase its impact
+          // to disambiguate vs. conversion failure of the same kind.
+          return recordFix(fix, /*impact=*/2) ? SolutionKind::Error
+                                              : SolutionKind::Solved;
         }
       }
 
@@ -7972,7 +8052,7 @@ ConstraintSystem::simplifyBindTupleOfFunctionParamsConstraint(
 
   auto tupleTy =
       AnyFunctionType::composeTuple(getASTContext(), funcTy->getParams(),
-                                    /*wantParamFlags*/ false);
+                                    ParameterFlagHandling::IgnoreNonEmpty);
 
   addConstraint(ConstraintKind::Bind, tupleTy, second,
                 locator.withPathElement(ConstraintLocator::FunctionArgument));
@@ -8034,16 +8114,12 @@ allFromConditionalConformances(DeclContext *DC, Type baseTy,
     }
 
     if (auto *protocol = candidateDC->getSelfProtocolDecl()) {
-      SmallVector<ProtocolConformance *, 4> conformances;
-      if (!NTD->lookupConformance(protocol, conformances))
+      auto conformance = DC->getParentModule()->lookupConformance(
+          baseTy, protocol);
+      if (!conformance.isConcrete())
         return false;
 
-      // This is opportunistic, there should be a way to narrow the
-      // list down to a particular declaration member comes from.
-      return llvm::any_of(
-          conformances, [](const ProtocolConformance *conformance) {
-            return !conformance->getConditionalRequirements().empty();
-          });
+      return !conformance.getConcrete()->getConditionalRequirements().empty();
     }
 
     return false;
@@ -8157,27 +8233,24 @@ performMemberLookup(ConstraintKind constraintKind, DeclNameRef memberName,
   // of the tuple.
   auto &ctx = getASTContext();
   if (auto baseTuple = baseObjTy->getAs<TupleType>()) {
-    // Tuples don't have compound-name members.
-    if (!memberName.isSimpleName() || memberName.isSpecial())
-      return result;  // No result.
+    if (!memberName.isSpecial()) {
+      StringRef nameStr = memberName.getBaseIdentifier().str();
+      int fieldIdx = -1;
+      // Resolve a number reference into the tuple type.
+      unsigned Value = 0;
+      if (!nameStr.getAsInteger(10, Value) &&
+          Value < baseTuple->getNumElements()) {
+        fieldIdx = Value;
+      } else {
+        fieldIdx = baseTuple->getNamedElementId(memberName.getBaseIdentifier());
+      }
 
-    StringRef nameStr = memberName.getBaseIdentifier().str();
-    int fieldIdx = -1;
-    // Resolve a number reference into the tuple type.
-    unsigned Value = 0;
-    if (!nameStr.getAsInteger(10, Value) &&
-        Value < baseTuple->getNumElements()) {
-      fieldIdx = Value;
-    } else {
-      fieldIdx = baseTuple->getNamedElementId(memberName.getBaseIdentifier());
+      if (fieldIdx != -1) {
+        // Add an overload set that selects this field.
+        result.ViableCandidates.push_back(OverloadChoice(baseTy, fieldIdx));
+        return result;
+      }
     }
-    
-    if (fieldIdx == -1)
-      return result;    // No result.
-    
-    // Add an overload set that selects this field.
-    result.ViableCandidates.push_back(OverloadChoice(baseTy, fieldIdx));
-    return result;
   }
 
   if (auto *selfTy = instanceTy->getAs<DynamicSelfType>())
@@ -8803,15 +8876,12 @@ static ConstraintFix *validateInitializerRef(ConstraintSystem &cs,
   if (!anchor)
     return nullptr;
 
+  // Avoid checking implicit conversions injected by the compiler.
+  if (locator->findFirst<LocatorPathElt::ImplicitConversion>())
+    return nullptr;
+
   auto getType = [&cs](Expr *expr) -> Type {
     return cs.simplifyType(cs.getType(expr))->getRValueType();
-  };
-
-  auto locatorEndsWith =
-      [](ConstraintLocator *locator,
-         ConstraintLocator::PathElementKind eltKind) -> bool {
-    auto path = locator->getPath();
-    return !path.empty() && path.back().getKind() == eltKind;
   };
 
   Expr *baseExpr = nullptr;
@@ -8870,7 +8940,7 @@ static ConstraintFix *validateInitializerRef(ConstraintSystem &cs,
     // member.
     // We need to find type variable which represents contextual base.
     auto *baseLocator = cs.getConstraintLocator(
-        UME, locatorEndsWith(locator, ConstraintLocator::ConstructorMember)
+        UME, locator->isLastElement<LocatorPathElt::ConstructorMember>()
                  ? ConstraintLocator::UnresolvedMember
                  : ConstraintLocator::MemberRefBase);
 
@@ -8885,7 +8955,7 @@ static ConstraintFix *validateInitializerRef(ConstraintSystem &cs,
     baseType = cs.simplifyType(*result)->getRValueType();
     // Constraint for member base is formed as '$T.Type[.<member] = ...`
     // which means MetatypeType has to be added after finding a type variable.
-    if (locatorEndsWith(baseLocator, ConstraintLocator::MemberRefBase))
+    if (baseLocator->isLastElement<LocatorPathElt::MemberRefBase>())
       baseType = MetatypeType::get(baseType);
   } else if (auto *keyPathExpr = getAsExpr<KeyPathExpr>(anchor)) {
     // Key path can't refer to initializers e.g. `\Type.init`
@@ -9174,12 +9244,78 @@ ConstraintSystem::SolutionKind ConstraintSystem::simplifyMemberConstraint(
         markMemberTypeAsPotentialHole(memberTy);
         return SolutionKind::Solved;
       }
-    } else if (kind == ConstraintKind::ValueMember &&
+    } else if ((kind == ConstraintKind::ValueMember ||
+                kind == ConstraintKind::ValueWitness) &&
                baseObjTy->getMetatypeInstanceType()->isPlaceholder()) {
       // If base type is a "hole" there is no reason to record any
       // more "member not found" fixes for chained member references.
       markMemberTypeAsPotentialHole(memberTy);
       return SolutionKind::Solved;
+    }
+  }
+
+  // Special handling of injected references to `makeIterator` and `next`
+  // in for-in loops.
+  if (auto *expr = getAsExpr(locator->getAnchor())) {
+    // `next()` could be wrapped in `await` expression.
+    auto memberRef =
+        getAsExpr<UnresolvedDotExpr>(expr->getSemanticsProvidingExpr());
+
+    if (memberRef && memberRef->isImplicit() &&
+        locator->isLastElement<LocatorPathElt::Member>()) {
+      auto &ctx = getASTContext();
+
+      // Cannot simplify this constraint yet since we don't know whether
+      // the base type is going to be existential or not.
+      if (baseObjTy->isTypeVariableOrMember())
+        return formUnsolved();
+
+      // Check whether the given dot expression is a reference
+      // to the given name with the given set of argument labels
+      // (aka compound name).
+      auto isRefTo = [&](UnresolvedDotExpr *UDE, Identifier name,
+                         ArrayRef<StringRef> labels) {
+        auto refName = UDE->getName().getFullName();
+        return refName.isCompoundName(name, labels);
+      };
+
+      auto *baseExpr = memberRef->getBase();
+      // Handle `makeIterator` reference.
+      if (getContextualTypePurpose(baseExpr) == CTP_ForEachSequence &&
+          isRefTo(memberRef, ctx.Id_makeIterator, /*lables=*/{})) {
+        auto *sequenceProto = cast<ProtocolDecl>(
+            getContextualType(baseExpr, /*forConstraint=*/false)
+                ->getAnyNominal());
+        bool isAsync = sequenceProto ==
+                       TypeChecker::getProtocol(
+                           ctx, SourceLoc(), KnownProtocolKind::AsyncSequence);
+
+        auto *makeIterator = isAsync ? ctx.getAsyncSequenceMakeAsyncIterator()
+                                     : ctx.getSequenceMakeIterator();
+
+        return simplifyValueWitnessConstraint(
+            ConstraintKind::ValueWitness, baseTy, makeIterator, memberTy, useDC,
+            FunctionRefKind::Compound, flags, locator);
+      }
+
+      // Handle `next` reference.
+      if (getContextualTypePurpose(baseExpr) == CTP_ForEachSequence &&
+          isRefTo(memberRef, ctx.Id_next, /*labels=*/{})) {
+        auto *iteratorProto = cast<ProtocolDecl>(
+            getContextualType(baseExpr, /*forConstraint=*/false)
+                ->getAnyNominal());
+        bool isAsync =
+            iteratorProto ==
+            TypeChecker::getProtocol(ctx, SourceLoc(),
+                                     KnownProtocolKind::AsyncIteratorProtocol);
+
+        auto *next =
+            isAsync ? ctx.getAsyncIteratorNext() : ctx.getIteratorNext();
+
+        return simplifyValueWitnessConstraint(
+            ConstraintKind::ValueWitness, baseTy, next, memberTy, useDC,
+            FunctionRefKind::Compound, flags, locator);
+      }
     }
   }
 
@@ -9596,6 +9732,83 @@ ConstraintSystem::SolutionKind ConstraintSystem::simplifyMemberConstraint(
   return SolutionKind::Error;
 }
 
+ConstraintSystem::SolutionKind
+ConstraintSystem::simplifyValueWitnessConstraint(
+    ConstraintKind kind, Type baseType, ValueDecl *requirement, Type memberType,
+    DeclContext *useDC, FunctionRefKind functionRefKind,
+    TypeMatchOptions flags, ConstraintLocatorBuilder locator) {
+  // We'd need to record original base type because it might be a type
+  // variable representing another missing member.
+  auto origBaseType = baseType;
+
+  auto formUnsolved = [&] {
+    // If requested, generate a constraint.
+    if (flags.contains(TMF_GenerateConstraints)) {
+      auto *witnessConstraint = Constraint::createValueWitness(
+          *this, kind, origBaseType, memberType, requirement, useDC,
+          functionRefKind, getConstraintLocator(locator));
+
+      addUnsolvedConstraint(witnessConstraint);
+      return SolutionKind::Solved;
+    }
+
+    return SolutionKind::Unsolved;
+  };
+
+  auto fail = [&] {
+    // The constraint failed, so mark the member type as a "hole".
+    // We cannot do anything further here.
+    if (!shouldAttemptFixes())
+      return SolutionKind::Error;
+
+    recordAnyTypeVarAsPotentialHole(memberType);
+
+    return SolutionKind::Solved;
+  };
+
+  // Resolve the base type, if we can. If we can't resolve the base type,
+  // then we can't solve this constraint.
+  Type baseObjectType = getFixedTypeRecursive(
+      baseType, flags, /*wantRValue=*/true);
+  if (baseObjectType->isTypeVariableOrMember()) {
+    return formUnsolved();
+  }
+
+  // If base type is an existential, let's open it before checking
+  // conformance.
+  if (baseObjectType->isExistentialType()) {
+    baseObjectType =
+        OpenedArchetypeType::get(baseObjectType->getCanonicalType(),
+                                 useDC->getGenericSignatureOfContext());
+  }
+
+  // Check conformance to the protocol. If it doesn't conform, this constraint
+  // fails. Don't attempt to fix it.
+  // FIXME: Look in the constraint system to see if we've resolved the
+  // conformance already?
+  auto proto = requirement->getDeclContext()->getSelfProtocolDecl();
+  assert(proto && "Value witness constraint for a non-requirement");
+  auto conformance = useDC->getParentModule()->lookupConformance(
+      baseObjectType, proto);
+  if (!conformance)
+    return fail();
+
+  // Reference the requirement.
+  Type resolvedBaseType = simplifyType(baseType, flags);
+  if (resolvedBaseType->isTypeVariableOrMember())
+    return formUnsolved();
+
+  auto witness =
+      conformance.getWitnessByName(baseObjectType, requirement->getName());
+  if (!witness)
+    return fail();
+
+  auto choice = OverloadChoice(resolvedBaseType, witness.getDecl(), functionRefKind);
+  resolveOverload(getConstraintLocator(locator), memberType, choice,
+                  useDC);
+  return SolutionKind::Solved;
+}
+
 ConstraintSystem::SolutionKind ConstraintSystem::simplifyDefaultableConstraint(
     Type first, Type second, TypeMatchOptions flags,
     ConstraintLocatorBuilder locator) {
@@ -9794,7 +10007,9 @@ static Type getOpenedResultBuilderTypeFor(ConstraintSystem &cs,
   auto *calleeLocator = cs.getCalleeLocator(cs.getConstraintLocator(locator));
   auto selectedOverload = cs.findSelectedOverloadFor(calleeLocator);
   if (!(selectedOverload &&
-        selectedOverload->choice.getKind() == OverloadChoiceKind::Decl))
+        (selectedOverload->choice.getKind() == OverloadChoiceKind::Decl ||
+         selectedOverload->choice.getKind() ==
+             OverloadChoiceKind::DeclViaUnwrappedOptional)))
     return Type();
 
   auto *choice = selectedOverload->choice.getDecl();
@@ -9951,7 +10166,7 @@ bool ConstraintSystem::resolveClosure(TypeVariableType *typeVar,
         wrappedValueType = createTypeVariable(getConstraintLocator(paramDecl),
                                               TVO_CanBindToHole | TVO_CanBindToLValue);
       } else {
-        auto *wrapperAttr = paramDecl->getAttachedPropertyWrappers().front();
+        auto *wrapperAttr = paramDecl->getOutermostAttachedPropertyWrapper();
         auto wrapperType = paramDecl->getAttachedPropertyWrapperType(0);
         backingType = replaceInferableTypesWithTypeVars(
             wrapperType, getConstraintLocator(wrapperAttr->getTypeRepr()));
@@ -11135,7 +11350,7 @@ retry_after_fail:
     if (isDebugMode()) {
       PrintOptions PO;
       PO.PrintTypesForDebugging = true;
-      llvm::errs().indent(solverState ? solverState->depth * 2 : 0)
+      llvm::errs().indent(solverState ? solverState->getCurrentIndent() : 0)
         << "(common result type for $T" << fnTypeVar->getID() << " is "
         << commonResultType.getString(PO)
         << ")\n";
@@ -12641,7 +12856,7 @@ static bool isAugmentingFix(ConstraintFix *fix) {
 bool ConstraintSystem::recordFix(ConstraintFix *fix, unsigned impact) {
   if (isDebugMode()) {
     auto &log = llvm::errs();
-    log.indent(solverState ? solverState->depth * 2 : 0)
+    log.indent(solverState ? solverState->getCurrentIndent() : 0)
       << "(attempting fix ";
     fix->print(log);
     log << ")\n";
@@ -12837,7 +13052,7 @@ ConstraintSystem::SolutionKind ConstraintSystem::simplifyFixConstraint(
       }
     }
     auto matchingType =
-        TupleType::get(newTupleTypes, getASTContext())->castTo<TupleType>();
+        TupleType::get(newTupleTypes, getASTContext());
     if (recordFix(fix))
       return SolutionKind::Error;
     return matchTupleTypes(matchingType, smaller, matchKind, subflags, locator);
@@ -12917,7 +13132,7 @@ ConstraintSystem::SolutionKind ConstraintSystem::simplifyFixConstraint(
   case FixKind::IgnoreInvalidASTNode: {
     return recordFix(fix, 10) ? SolutionKind::Error : SolutionKind::Solved;
   }
-  case FixKind::IgnoreInvalidNamedPattern: {
+  case FixKind::IgnoreUnresolvedPatternVar: {
     return recordFix(fix, 100) ? SolutionKind::Error : SolutionKind::Solved;
   }
 
@@ -13220,6 +13435,7 @@ ConstraintSystem::addConstraintImpl(ConstraintKind kind, Type first,
 
   case ConstraintKind::ValueMember:
   case ConstraintKind::UnresolvedValueMember:
+  case ConstraintKind::ValueWitness:
   case ConstraintKind::BindOverload:
   case ConstraintKind::Disjunction:
   case ConstraintKind::Conjunction:
@@ -13380,6 +13596,9 @@ void ConstraintSystem::addConstraint(Requirement req,
   bool conformsToAnyObject = false;
   Optional<ConstraintKind> kind;
   switch (req.getKind()) {
+  case RequirementKind::SameCount:
+    llvm_unreachable("Same-count requirement not supported here");
+
   case RequirementKind::Conformance:
     kind = ConstraintKind::ConformsTo;
     break;
@@ -13709,6 +13928,16 @@ ConstraintSystem::simplifyConstraint(const Constraint &constraint) {
                                     constraint.getFunctionRefKind(),
                                     /*outerAlternatives=*/{},
                                     /*flags*/ None, constraint.getLocator());
+
+  case ConstraintKind::ValueWitness:
+    return simplifyValueWitnessConstraint(constraint.getKind(),
+                                          constraint.getFirstType(),
+                                          constraint.getRequirement(),
+                                          constraint.getSecondType(),
+                                          constraint.getMemberUseDC(),
+                                          constraint.getFunctionRefKind(),
+                                          /*flags*/ None,
+                                          constraint.getLocator());
 
   case ConstraintKind::Defaultable:
     return simplifyDefaultableConstraint(constraint.getFirstType(),

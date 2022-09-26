@@ -29,6 +29,10 @@
 
 using namespace swift;
 
+LangOptions::LangOptions() {
+  // Note: Introduce default-on language options here.
+}
+
 struct SupportedConditionalValue {
   StringRef value;
 
@@ -260,11 +264,12 @@ std::pair<bool, bool> LangOptions::setTarget(llvm::Triple triple) {
     llvm::raw_svector_ostream osx(osxBuf);
     osx << llvm::Triple::getOSTypeName(llvm::Triple::MacOSX);
 
-    unsigned major, minor, micro;
-    triple.getMacOSXVersion(major, minor, micro);
-    osx << major << "." << minor;
-    if (micro != 0)
-      osx << "." << micro;
+    llvm::VersionTuple OSVersion;
+    triple.getMacOSXVersion(OSVersion);
+
+    osx << OSVersion.getMajor() << "." << OSVersion.getMinor().getValueOr(0);
+    if (auto Subminor = OSVersion.getSubminor())
+      osx << "." << *Subminor;
 
     triple.setOSName(osx.str());
   }

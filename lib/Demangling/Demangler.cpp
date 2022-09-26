@@ -561,9 +561,8 @@ Demangler::DemangleInitRAII::~DemangleInitRAII() {
 }
 
 NodePointer Demangler::demangleSymbol(StringRef MangledName,
-        std::function<SymbolicReferenceResolver_t> SymbolicReferenceResolver) {
-  DemangleInitRAII state(*this, MangledName,
-                         std::move(SymbolicReferenceResolver));
+        std::function<SymbolicReferenceResolver_t> Resolver) {
+  DemangleInitRAII state(*this, MangledName, std::move(Resolver));
 
 #if SWIFT_SUPPORT_OLD_MANGLING
   // Demangle old-style class and protocol names, which are still used in the
@@ -610,9 +609,8 @@ NodePointer Demangler::demangleSymbol(StringRef MangledName,
 }
 
 NodePointer Demangler::demangleType(StringRef MangledName,
-        std::function<SymbolicReferenceResolver_t> SymbolicReferenceResolver) {
-  DemangleInitRAII state(*this, MangledName,
-                         std::move(SymbolicReferenceResolver));
+        std::function<SymbolicReferenceResolver_t> Resolver) {
+  DemangleInitRAII state(*this, MangledName, std::move(Resolver));
 
   parseAndPushNodes();
 
@@ -3664,7 +3662,7 @@ NodePointer Demangler::demangleGenericRequirement() {
   
   enum { Generic, Assoc, CompoundAssoc, Substitution } TypeKind;
   enum { Protocol, BaseClass, SameType, Layout } ConstraintKind;
-  
+
   switch (nextChar()) {
     case 'c': ConstraintKind = BaseClass; TypeKind = Assoc; break;
     case 'C': ConstraintKind = BaseClass; TypeKind = CompoundAssoc; break;
@@ -3760,8 +3758,8 @@ NodePointer Demangler::demangleGenericRequirement() {
     }
 
     auto NameNode = createNode(Node::Kind::Identifier, name);
-    auto LayoutRequirement = createWithChildren(
-        Node::Kind::DependentGenericLayoutRequirement, ConstrTy, NameNode);
+    auto NodeKind = Node::Kind::DependentGenericLayoutRequirement;
+    auto LayoutRequirement = createWithChildren(NodeKind, ConstrTy, NameNode);
     if (size)
       addChild(LayoutRequirement, size);
     if (alignment)

@@ -107,6 +107,33 @@ enum class FreeTypeVariableBinding {
   UnresolvedType
 };
 
+/// Describes whether or not a result builder method is supported.
+struct ResultBuilderOpSupport {
+  enum Classification {
+    Unsupported,
+    Unavailable,
+    Supported
+  };
+  Classification Kind;
+
+  ResultBuilderOpSupport(Classification Kind) : Kind(Kind) {}
+
+  /// Returns whether or not the builder method is supported. If
+  /// \p requireAvailable is true, an unavailable method will be considered
+  /// unsupported.
+  bool isSupported(bool requireAvailable) const {
+    switch (Kind) {
+    case Unsupported:
+      return false;
+    case Unavailable:
+      return !requireAvailable;
+    case Supported:
+      return true;
+    }
+    llvm_unreachable("Unhandled case in switch!");
+  }
+};
+
 namespace constraints {
 
 struct ResultBuilder {
@@ -115,7 +142,9 @@ private:
   /// An implicit variable that represents `Self` type of the result builder.
   VarDecl *BuilderSelf;
   Type BuilderType;
-  llvm::SmallDenseMap<DeclName, bool> SupportedOps;
+
+  /// Cache of supported result builder operations.
+  llvm::SmallDenseMap<DeclName, ResultBuilderOpSupport> SupportedOps;
 
   Identifier BuildOptionalId;
 
@@ -134,12 +163,21 @@ public:
     return BuilderType->getAnyNominal();
   }
 
+  VarDecl *getBuilderSelf() const { return BuilderSelf; }
+
   Identifier getBuildOptionalId() const { return BuildOptionalId; }
 
   bool supports(Identifier fnBaseName, ArrayRef<Identifier> argLabels = {},
                 bool checkAvailability = false);
 
   bool supportsOptional() { return supports(getBuildOptionalId()); }
+
+  /// Checks whether the `buildPartialBlock` method is supported.
+  bool supportsBuildPartialBlock(bool checkAvailability);
+
+  /// Checks whether the builder can use `buildPartialBlock` to combine
+  /// expressions, instead of `buildBlock`.
+  bool canUseBuildPartialBlock();
 
   Expr *buildCall(SourceLoc loc, Identifier fnName,
                   ArrayRef<Expr *> argExprs,
@@ -588,7 +626,7 @@ public:
 
   /// Print the type variable to the given output stream.
   void print(llvm::raw_ostream &OS);
-  
+
 private:
   StringRef getTypeVariableOptions(TypeVariableOptions TVO) const {
   #define ENTRY(Kind, String) case TypeVariableOptions::Kind: return String
@@ -645,6 +683,10 @@ T *getAsPattern(ASTNode node) {
   if (auto *P = node.dyn_cast<Pattern *>())
     return dyn_cast_or_null<T>(P);
   return nullptr;
+}
+
+template <typename T = Stmt> T *castToStmt(ASTNode node) {
+  return cast<T>(node.get<Stmt *>());
 }
 
 SourceLoc getLoc(ASTNode node);
@@ -709,13 +751,29 @@ class FunctionArgApplyInfo {
   FunctionType *FnType;
   const ValueDecl *Callee;
 
-public:
   FunctionArgApplyInfo(ArgumentList *argList, Expr *argExpr, unsigned argIdx,
                        Type argType, unsigned paramIdx, Type fnInterfaceType,
                        FunctionType *fnType, const ValueDecl *callee)
       : ArgList(argList), ArgExpr(argExpr), ArgIdx(argIdx), ArgType(argType),
         ParamIdx(paramIdx), FnInterfaceType(fnInterfaceType), FnType(fnType),
         Callee(callee) {}
+
+public:
+  static Optional<FunctionArgApplyInfo>
+  get(ArgumentList *argList, Expr *argExpr, unsigned argIdx, Type argType,
+      unsigned paramIdx, Type fnInterfaceType, FunctionType *fnType,
+      const ValueDecl *callee) {
+    assert(fnType);
+
+    if (argIdx >= argList->size())
+      return None;
+
+    if (paramIdx >= fnType->getNumParams())
+      return None;
+
+    return FunctionArgApplyInfo(argList, argExpr, argIdx, argType, paramIdx,
+                                fnInterfaceType, fnType, callee);
+  }
 
   /// \returns The list of the arguments used for this application.
   ArgumentList *getArgList() const { return ArgList; }
@@ -910,6 +968,10 @@ struct AppliedBuilderTransform {
   /// converted. Opaque types should be unopened.
   Type bodyResultType;
 
+  /// The version of the original body with result builder applied
+  /// as AST transformation.
+  NullablePtr<BraceStmt> transformedBody;
+
   /// An expression whose value has been recorded for later use.
   struct RecordedExpr {
     /// The temporary value that captures the value of the expression, if
@@ -935,6 +997,10 @@ struct AppliedBuilderTransform {
   /// The return expression, capturing the last value to be emitted.
   Expr *returnExpr = nullptr;
 };
+
+struct Score;
+/// Display a score.
+llvm::raw_ostream &operator<<(llvm::raw_ostream &out, const Score &score);
 
 /// Describes the fixed score of a solution to the constraint system.
 struct Score {
@@ -1006,11 +1072,93 @@ struct Score {
   friend bool operator>=(const Score &x, const Score &y) {
     return !(x < y);
   }
+  
+  /// Return ScoreKind descriptions for printing alongside non-zero ScoreKinds
+  /// in debug output.
+  static std::string getNameFor(ScoreKind kind) {
+    switch (kind) {
+    case SK_Hole:
+      return "hole";
 
+    case SK_Unavailable:
+      return "use of an unavailable declaration";
+
+    case SK_AsyncInSyncMismatch:
+      return "async-in-synchronous mismatch";
+
+    case SK_SyncInAsync:
+      return "sync-in-asynchronous";
+
+    case SK_ForwardTrailingClosure:
+      return "forward scan when matching a trailing closure";
+
+    case SK_Fix:
+      return "applied fix";
+
+    case SK_DisfavoredOverload:
+      return "disfavored overload";
+
+    case SK_UnresolvedMemberViaOptional:
+      return "unwrapping optional at unresolved member base";
+
+    case SK_ForceUnchecked:
+      return "force of an implicitly unwrapped optional";
+
+    case SK_UserConversion:
+      return "user conversion";
+
+    case SK_FunctionConversion:
+      return "function conversion";
+
+    case SK_NonDefaultLiteral:
+      return "non-default literal";
+
+    case SK_CollectionUpcastConversion:
+      return "collection upcast conversion";
+
+    case SK_ValueToOptional:
+      return "value to optional promotion";
+
+    case SK_EmptyExistentialConversion:
+      return "empty-existential conversion";
+
+    case SK_KeyPathSubscript:
+      return "key path subscript";
+
+    case SK_ValueToPointerConversion:
+      return "value-to-pointer conversion";
+
+    case SK_FunctionToAutoClosureConversion:
+      return "function to autoclosure parameter conversion";
+
+    case SK_ImplicitValueConversion:
+      return "value-to-value conversion";
+
+    case SK_UnappliedFunction:
+      return "use of overloaded unapplied function";
+    }
+  }
+
+  /// Print Score list a with brief description of any non-zero ScoreKinds.
+  void print(llvm::raw_ostream &out) const {
+    bool hasNonDefault = false;
+    for (unsigned int i = 0; i < NumScoreKinds; ++i) {
+      if (Data[i] != 0) {
+        out << " [component: ";
+        out << getNameFor(ScoreKind(i));
+        out << "(s), value: ";
+        out << std::to_string(Data[i]);
+        out << "]";
+        hasNonDefault = true;
+      }
+    }
+    if (!hasNonDefault) {
+      out << " <default ";
+      out << *this;
+      out << ">";
+    }
+  }
 };
-
-/// Display a score.
-llvm::raw_ostream &operator<<(llvm::raw_ostream &out, const Score &score);
 
 /// Describes a dependent type that has been opened to a particular type
 /// variable.
@@ -1059,6 +1207,7 @@ public:
     pattern,
     patternBindingEntry,
     varDecl,
+    functionRef,
   };
 
 private:
@@ -1079,6 +1228,8 @@ private:
     } patternBindingEntry;
 
     const VarDecl *varDecl;
+
+    const DeclContext *functionRef;
   } storage;
 
 public:
@@ -1124,6 +1275,11 @@ public:
     storage.varDecl = varDecl;
   }
 
+  SolutionApplicationTargetsKey(const AnyFunctionRef functionRef) {
+    kind = Kind::functionRef;
+    storage.functionRef = functionRef.getAsDeclContext();
+  }
+
   friend bool operator==(
       SolutionApplicationTargetsKey lhs, SolutionApplicationTargetsKey rhs) {
     if (lhs.kind != rhs.kind)
@@ -1155,6 +1311,9 @@ public:
 
     case Kind::varDecl:
       return lhs.storage.varDecl == rhs.storage.varDecl;
+
+    case Kind::functionRef:
+      return lhs.storage.functionRef == rhs.storage.functionRef;
     }
     llvm_unreachable("invalid SolutionApplicationTargetsKey kind");
   }
@@ -1206,6 +1365,11 @@ public:
       return hash_combine(
           DenseMapInfo<unsigned>::getHashValue(static_cast<unsigned>(kind)),
           DenseMapInfo<void *>::getHashValue(storage.varDecl));
+
+    case Kind::functionRef:
+      return hash_combine(
+          DenseMapInfo<unsigned>::getHashValue(static_cast<unsigned>(kind)),
+          DenseMapInfo<void *>::getHashValue(storage.functionRef));
     }
     llvm_unreachable("invalid statement kind");
   }
@@ -1431,6 +1595,10 @@ public:
 
   /// Retrieve the fixed score of this solution
   Score &getFixedScore() { return FixedScore; }
+
+  /// Check whether this solution has a fixed binding for the given type
+  /// variable.
+  bool hasFixedType(TypeVariableType *typeVar) const;
 
   /// Retrieve the fixed type for the given type variable.
   Type getFixedType(TypeVariableType *typeVar) const;
@@ -2710,6 +2878,14 @@ private:
   /// diagnostics when result builder has multiple overloads.
   llvm::SmallDenseSet<AnyFunctionRef> InvalidResultBuilderBodies;
 
+  /// The *global* set of all functions that have a particular result builder
+  /// applied.
+  ///
+  /// The value here is `$__builderSelf` variable and a transformed body.
+  llvm::DenseMap<std::pair<AnyFunctionRef, NominalTypeDecl *>,
+                 std::pair<VarDecl *, BraceStmt *>>
+      BuilderTransformedBodies;
+
   /// Arguments after the code completion token that were thus ignored (i.e.
   /// assigned fresh type variables) for type checking.
   llvm::SetVector<Expr *> IgnoredArguments;
@@ -2932,9 +3108,9 @@ private:
     ConstraintSystem &CS;
 
     FreeTypeVariableBinding AllowFreeTypeVariables;
-
-    /// Depth of the solution stack.
-    unsigned depth = 0;
+    
+    /// Return current depth of solution stack for debug printing.
+    unsigned int getCurrentIndent() const { return depth * 2; }
 
     /// Maximum depth reached so far in exploring solutions.
     unsigned maxDepth = 0;
@@ -3117,6 +3293,9 @@ private:
 
     SmallVector<Constraint *, 4> disabledConstraints;
     SmallVector<Constraint *, 4> favoredConstraints;
+    
+    /// Depth of the solution stack.
+    unsigned depth = 0;
   };
 
   class CacheExprTypes : public ASTWalker {
@@ -3128,10 +3307,10 @@ private:
     CacheExprTypes(Expr *expr, ConstraintSystem &cs, bool excludeRoot)
         : RootExpr(expr), CS(cs), ExcludeRoot(excludeRoot) {}
 
-    Expr *walkToExprPost(Expr *expr) override {
+    PostWalkResult<Expr *> walkToExprPost(Expr *expr) override {
       if (ExcludeRoot && expr == RootExpr) {
         assert(!expr->getType() && "Unexpected type in root of expression!");
-        return expr;
+        return Action::Continue(expr);
       }
 
       if (expr->getType())
@@ -3142,16 +3321,18 @@ private:
           if (kp->getComponents()[i].getComponentType())
             CS.cacheType(kp, i);
 
-      return expr;
+      return Action::Continue(expr);
     }
 
     /// Ignore statements.
-    std::pair<bool, Stmt *> walkToStmtPre(Stmt *stmt) override {
-      return { false, stmt };
+    PreWalkResult<Stmt *> walkToStmtPre(Stmt *stmt) override {
+      return Action::SkipChildren(stmt);
     }
 
     /// Ignore declarations.
-    bool walkToDeclPre(Decl *decl) override { return false; }
+    PreWalkAction walkToDeclPre(Decl *decl) override {
+      return Action::SkipChildren();
+    }
   };
 
 public:
@@ -3714,6 +3895,35 @@ public:
     return known->second;
   }
 
+  Optional<AppliedBuilderTransform>
+  getAppliedResultBuilderTransform(AnyFunctionRef fn) const {
+    auto transformed = resultBuilderTransformed.find(fn);
+    if (transformed != resultBuilderTransformed.end())
+      return transformed->second;
+    return None;
+  }
+
+  void setBuilderTransformedBody(AnyFunctionRef fn, NominalTypeDecl *builder,
+                                 NullablePtr<VarDecl> builderSelf,
+                                 NullablePtr<BraceStmt> body) {
+    assert(builder->getAttrs().hasAttribute<ResultBuilderAttr>());
+    assert(body);
+    assert(builderSelf);
+
+    auto existing = BuilderTransformedBodies.insert(
+        {{fn, builder}, {builderSelf.get(), body.get()}});
+    assert(existing.second && "Duplicate result builder transform");
+    (void)existing;
+  }
+
+  Optional<std::pair<VarDecl *, BraceStmt *>>
+  getBuilderTransformedBody(AnyFunctionRef fn, NominalTypeDecl *builder) const {
+    auto result = BuilderTransformedBodies.find({fn, builder});
+    if (result == BuilderTransformedBodies.end())
+      return None;
+    return result->second;
+  }
+
   void setCaseLabelItemInfo(const CaseLabelItem *item, CaseLabelItemInfo info) {
     assert(item != nullptr);
     assert(caseLabelItems.count(item) == 0);
@@ -4144,6 +4354,26 @@ public:
     }
   }
 
+  /// Add a value witness constraint to the constraint system.
+  void addValueWitnessConstraint(
+      Type baseTy, ValueDecl *requirement, Type memberTy, DeclContext *useDC,
+      FunctionRefKind functionRefKind, ConstraintLocatorBuilder locator) {
+    assert(baseTy);
+    assert(memberTy);
+    assert(requirement);
+    assert(useDC);
+    switch (simplifyValueWitnessConstraint(
+        ConstraintKind::ValueWitness, baseTy, requirement, memberTy, useDC,
+        functionRefKind, TMF_GenerateConstraints, locator)) {
+    case SolutionKind::Unsolved:
+      llvm_unreachable("Unsolved result when generating constraints!");
+
+    case SolutionKind::Solved:
+    case SolutionKind::Error:
+      break;
+    }
+  }
+
   /// Add an explicit conversion constraint (e.g., \c 'x as T').
   ///
   /// \param fromType The type of the expression being converted.
@@ -4191,7 +4421,7 @@ public:
 
     if (isDebugMode()) {
       auto &log = llvm::errs();
-      log.indent(solverState ? solverState->depth * 2 : 0)
+      log.indent(solverState ? solverState->getCurrentIndent() + 4 : 0)
           << "(failed constraint ";
       constraint->print(log, &getASTContext().SourceMgr);
       log << ")\n";
@@ -4214,6 +4444,14 @@ public:
     // Add this constraint to the constraint graph.
     CG.addConstraint(constraint);
 
+    if (isDebugMode() && getPhase() == ConstraintSystemPhase::Solving) {
+      auto &log = llvm::errs();
+      log.indent(solverState->getCurrentIndent() + 4) << "(added constraint: ";
+      constraint->print(log, &getASTContext().SourceMgr,
+                        solverState->getCurrentIndent() + 4);
+      log << ")\n";
+    }
+
     // Record this as a newly-generated constraint.
     if (solverState)
       solverState->addGeneratedConstraint(constraint);
@@ -4223,6 +4461,15 @@ public:
   void removeInactiveConstraint(Constraint *constraint) {
     CG.removeConstraint(constraint);
     InactiveConstraints.erase(constraint);
+
+    if (isDebugMode() && getPhase() == ConstraintSystemPhase::Solving) {
+      auto &log = llvm::errs();
+      log.indent(solverState->getCurrentIndent() + 4)
+          << "(removed constraint: ";
+      constraint->print(log, &getASTContext().SourceMgr,
+                        solverState->getCurrentIndent() + 4);
+      log << ")\n";
+    }
 
     if (solverState)
       solverState->retireConstraint(constraint);
@@ -4591,7 +4838,8 @@ public:
   Type getUnopenedTypeOfReference(VarDecl *value, Type baseType,
                                   DeclContext *UseDC,
                                   ConstraintLocator *memberLocator = nullptr,
-                                  bool wantInterfaceType = false);
+                                  bool wantInterfaceType = false,
+                                  bool adjustForPreconcurrency = true);
 
   /// Return the type-of-reference of the given value.
   ///
@@ -4613,6 +4861,7 @@ public:
       llvm::function_ref<Type(VarDecl *)> getType,
       ConstraintLocator *memberLocator = nullptr,
       bool wantInterfaceType = false,
+      bool adjustForPreconcurrency = true,
       llvm::function_ref<Type(const AbstractClosureExpr *)> getClosureType =
         [](const AbstractClosureExpr *) {
           return Type();
@@ -4791,6 +5040,16 @@ public:
   /// \returns \c true if constraint generation failed, \c false otherwise
   LLVM_NODISCARD
   bool generateConstraints(ClosureExpr *closure);
+
+  /// Generate constraints for the body of the given function.
+  ///
+  /// \param fn The function or closure expression
+  /// \param body The body of the given function that should be
+  /// used for constraint generation.
+  ///
+  /// \returns \c true if constraint generation failed, \c false otherwise
+  LLVM_NODISCARD
+  bool generateConstraints(AnyFunctionRef fn, BraceStmt *body);
 
   /// Generate constraints for the given (unchecked) expression.
   ///
@@ -5361,6 +5620,9 @@ public:
 
   /// Apply the given result builder to the closure expression.
   ///
+  /// \note builderType must be a contexutal type - callers should
+  /// open the builder type or map it into context as appropriate.
+  ///
   /// \returns \c None when the result builder cannot be applied at all,
   /// otherwise the result of applying the result builder.
   Optional<TypeMatchResult>
@@ -5374,7 +5636,10 @@ public:
       Type wrapperType, Type paramType, ParamDecl *param, Identifier argLabel,
       ConstraintKind matchKind, ConstraintLocatorBuilder locator);
 
-  Optional<BindingSet> determineBestBindings();
+  /// Determine whether given type variable with its set of bindings is viable
+  /// to be attempted on the next step of the solver.
+  Optional<BindingSet> determineBestBindings(
+      llvm::function_ref<void(const BindingSet &)> onCandidate);
 
   /// Get bindings for the given type variable based on current
   /// state of the constraint system.
@@ -5640,14 +5905,14 @@ public:
   ///
   ///
   /// \param solution The solution to apply.
-  /// \param closure The closure to which the solution is being applied.
+  /// \param fn The function or closure to which the solution is being applied.
   /// \param currentDC The declaration context in which transformations
   /// will be applied.
   /// \param rewriteTarget Function that performs a rewrite of any
   /// solution application target within the context.
   ///
   /// \returns true if solution cannot be applied.
-  bool applySolutionToBody(Solution &solution, ClosureExpr *closure,
+  bool applySolutionToBody(Solution &solution, AnyFunctionRef fn,
                            DeclContext *&currentDC,
                            std::function<Optional<SolutionApplicationTarget>(
                                SolutionApplicationTarget)>
@@ -6485,6 +6750,13 @@ bool isOperatorDisjunction(Constraint *disjunction);
 /// or nested declarations).
 ASTNode findAsyncNode(ClosureExpr *closure);
 
+/// Check whether the given binding represents a placeholder variable that
+/// has to get its type inferred at a first use site.
+///
+/// \returns The currently assigned type if it's a placeholder,
+/// empty type otherwise.
+Type isPlaceholderVar(PatternBindingDecl *PB);
+
 } // end namespace constraints
 
 template<typename ...Args>
@@ -6518,7 +6790,7 @@ public:
   : NumOverloads(overloads)
   {}
 
-  std::pair<bool, Expr *> walkToExprPre(Expr *expr) override {
+  PreWalkResult<Expr *> walkToExprPre(Expr *expr) override {
     if (auto applyExpr = dyn_cast<ApplyExpr>(expr)) {
       // If we've found function application and it's
       // function is an overload set, count it.
@@ -6527,7 +6799,7 @@ public:
     }
 
     // Always recur into the children.
-    return { true, expr };
+    return Action::Continue(expr);
   }
 };
 

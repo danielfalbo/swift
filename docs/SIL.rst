@@ -956,7 +956,7 @@ Functions
   decl ::= sil-function
   sil-function ::= 'sil' sil-linkage? sil-function-attribute+
                      sil-function-name ':' sil-type
-                     '{' sil-basic-block+ '}'
+                     '{' argument-effect* sil-basic-block* '}'
   sil-function-name ::= '@' [A-Za-z_0-9]+
 
 SIL functions are defined with the ``sil`` keyword. SIL function names
@@ -967,6 +967,8 @@ The ``sil`` syntax declares the function's name and SIL type, and
 defines the body of the function inside braces. The declared type must
 be a function type, which may be generic.
 
+If a function body does not contain atleast one ``sil-basic-block``, the
+function is an external declaration.
 
 Function Attributes
 ```````````````````
@@ -1055,6 +1057,12 @@ the top-level `switch_enum`_.
 Cross-module references to this function should always use weak linking.
 ::
 
+  sil-function-attribute ::= '[stack_protection]'
+
+Stack protectors are inserted into this function to detect stack related
+buffer overflows.
+::
+
   sil-function-attribute ::= '[available' sil-version-tuple ']'
   sil-version-tuple ::= [0-9]+ ('.' [0-9]+)*
 
@@ -1090,30 +1098,6 @@ from the command line.
 The specified memory effects of the function.
 ::
 
-  sil-function-attribute ::= '[' 'escapes' escape-list ']'
-  sil-function-attribute ::= '[' 'defined_escapes' escape-list ']'
-  escape-list ::= (escape-list ',')? escape
-  escape ::= '!' arg-selection                 // not-escaping
-  escape ::= arg-selection '=>' arg-selection  // exclusive escaping
-  escape ::= arg-selection '->' arg-selection  // not-exclusive escaping
-  arg-selection ::= arg-or-return ('.' projection-path)?
-  arg-or-return ::= '%' [0-9]+
-  arg-or-return ::= '%r'
-  projection-path ::= (projection-path '.')? path-component
-  path-component ::= 's' [0-9]+        // struct field
-  path-component ::= 'c' [0-9]+        // class field
-  path-component ::= 'ct'              // class tail element
-  path-component ::= 'e' [0-9]+        // enum case
-  path-component ::= [0-9]+            // tuple element
-  path-component ::= 'v**'             // any value fields
-  path-component ::= 'c*'              // any class field
-  path-component ::= '**'              // anything
-
-The escaping effects for function arguments. For details see the documentation
-in ``SwiftCompilerSources/Sources/SIL/Effects.swift``.
-
-::
-
   sil-function-attribute ::= '[_semantics "' [A-Za-z._0-9]+ '"]'
 
 The specified high-level semantics of the function. The optimizer can use this
@@ -1140,6 +1124,34 @@ The clang node owner.
 Specifies the performance constraints for the function, which defines which type
 of runtime functions are allowed to be called from the function.
 
+
+Argument Effects
+````````````````
+
+The effects for function arguments. For details see the documentation
+in ``SwiftCompilerSources/Sources/SIL/Effects.swift``.
+::
+
+  argument-effect ::= '[' argument-name defined-effect? ':' effect (',' effect)*]'
+  argument-name ::= '%' [0-9]+
+  defined-effect ::= '!'    // the effect is defined in the source code and not
+                            // derived by the optimizer
+
+  effect ::= 'noescape' projection-path?
+  effect ::= 'escape' projection-path? '=>' arg-or-return  // exclusive escape
+  effect ::= 'escape' projection-path? '->' arg-or-return  // not-exclusive escape
+  arg-or-return ::= argument-name ('.' projection-path)?
+  arg-or-return ::= '%r' ('.' projection-path)?
+
+  projection-path ::= path-component ('.' path-component)* 
+  path-component ::= 's' [0-9]+        // struct field
+  path-component ::= 'c' [0-9]+        // class field
+  path-component ::= 'ct'              // class tail element
+  path-component ::= 'e' [0-9]+        // enum case
+  path-component ::= [0-9]+            // tuple element
+  path-component ::= 'v**'             // any value fields
+  path-component ::= 'c*'              // any class field
+  path-component ::= '**'              // anything
 
 Basic Blocks
 ~~~~~~~~~~~~
@@ -2587,9 +2599,9 @@ only values" that are guaranteed to never be copied. This is enforced by:
 * Having SILGen emit copies as it normally does.
 
 * Use OSSA canonicalization to eliminate copies that aren't needed semantically
-  due to consuming uses of the value. This is implemented by the pass guaranteed
-  pass "MoveOnlyChecker". Emit errors on any of the consuming uses that we found
-  in said pass.
+  due to consuming uses of the value. This is implemented by the guaranteed
+  passes "MoveOnlyObjectChecker" and "MoveOnlyAddressChecker". We will emit
+  errors on any of the consuming uses that we found in said pass.
 
 Assuming that no errors are emitted, we can then conclude before we reach
 canonical SIL that the value was never copied and thus is a "move only value"
@@ -2661,7 +2673,7 @@ rather than a viral type level annotation that would constrain the type system.
 As mentioned above trivial move only wrapped types are actually
 non-trivial. This is because in SIL ownership is tied directly to
 non-trivialness so unless we did that we could not track ownership
-accurately. This is loss of triviality is not an issue for most of the pipeline
+accurately. This loss of triviality is not an issue for most of the pipeline
 since we eliminate all move only wrapper types for trivial types during the
 guaranteed optimizations after we have run various ownership checkers but before
 we have run diagnostics for trivial types (e.x.: DiagnosticConstantPropagation).
@@ -2761,6 +2773,32 @@ the no implicit copy value. In fact, if one runs the following SILGen through
 sil-opt, one will see that we actually have an ownership violation due to the
 two uses of "value", one for initializing value2 and the other for the return
 value.
+
+Move Only Types
+---------------
+
+NOTE: This is experimental and is just an attempt to describe where the design
+is currently for others reading SIL today. It should not be interpreted as
+final.
+
+Currently there are two kinds of "move only types" in SIL: pure move only types
+that are always move only and move only wrapped types that are move only
+versions of copyable types. The invariant that values of Move Only type obey is
+that they can only be copied (e.x.: operand to a `copy_value`_, ``copy_addr [init]``) during the
+guaranteed passes when we are in Raw SIL. Once we are in non-Raw SIL though
+(i.e. Canonical and later SIL stages), a program is ill formed if one copies a
+move only type.
+
+The reason why we have this special rule for move only types is that this allows
+for SIL code generators to insert copies and then have a later guaranteed
+checker optimization pass recover the underlying move only semantics by
+reconstructing needed copies and removing unneeded copies using Ownership
+SSA. If any such copies are actually needed according to Ownership SSA, the
+checker pass emits a diagnostic stating that move semantics have been
+violated. If such a diagnostic is emitted then the checker pass transforms all
+copies on move only types to their explicit copy forms to ensure that once we
+leave the diagnostic passes and enter canonical SIL, our "copy" invariant is
+maintained.
 
 Runtime Failure
 ---------------
@@ -3872,6 +3910,22 @@ It is worth noting that a SIL DIExpression is similar to
 info metadata. While LLVM represents ``!DIExpression`` are a list of 64-bit integers,
 SIL DIExpression can have elements with various types, like AST nodes or strings.
 
+Profiling
+~~~~~~~~~
+
+increment_profiler_counter
+``````````````````````````
+::
+
+  sil-instruction ::= 'increment_profiler_counter' int-literal ',' string-literal ',' 'num_counters' int-literal ',' 'hash' int-literal
+
+  increment_profiler_counter 1, "$foo", num_counters 3, hash 0
+
+Increments a given profiler counter for a given PGO function name. This is
+lowered to the ``llvm.instrprof.increment`` LLVM intrinsic. This instruction
+is emitted when profiling is enabled, and enables features such as code coverage
+and profile-guided optimization.
+
 Accessing Memory
 ~~~~~~~~~~~~~~~~
 
@@ -4219,6 +4273,25 @@ operations::
 If ``T`` is a trivial type, then ``copy_addr`` is always equivalent to its
 take-initialization form.
 
+It is illegal in non-Raw SIL to apply ``copy_addr [init]`` to a value that is
+move only.
+
+explicit_copy_addr
+``````````````````
+::
+
+  sil-instruction ::= 'explicit_copy_addr' '[take]'? sil-value
+                        'to' '[initialization]'? sil-operand
+
+  explicit_copy_addr [take] %0 to [initialization] %1 : $*T
+  // %0 and %1 must be of the same $*T address type
+
+This instruction is exactly the same as `copy_addr`_ except that it has special
+behavior for move only types. Specifically, an `explicit_copy_addr`_ is viewed
+as a copy_addr that is allowed on values that are move only. This is only used
+by a move checker after it has emitted an error diagnostic to preserve the
+general ``copy_addr [init]`` ban in Canonical SIL on move only types.
+
 destroy_addr
 ````````````
 ::
@@ -4247,7 +4320,7 @@ index_addr
 ``````````
 ::
 
-  sil-instruction ::= 'index_addr' sil-operand ',' sil-operand
+  sil-instruction ::= 'index_addr' ('[' 'stack_protection' ']')? sil-operand ',' sil-operand
 
   %2 = index_addr %0 : $*T, %1 : $Builtin.Int<n>
   // %0 must be of an address type $*T
@@ -4262,6 +4335,9 @@ bytes within a value, using ``index_addr``. (``Int8`` address types have no
 special behavior in this regard, unlike ``char*`` or ``void*`` in C.) It is
 also undefined behavior to index out of bounds of an array, except to index
 the "past-the-end" address of the array.
+
+The ``stack_protection`` flag indicates that stack protection is done for
+the pointer origin.
 
 tail_addr
 `````````
@@ -4318,11 +4394,22 @@ bind_memory
 Binds memory at ``Builtin.RawPointer`` value ``%0`` to type ``$T`` with enough
 capacity to hold ``%1`` values. See SE-0107: UnsafeRawPointer.
 
-Produces a opaque token representing the previous memory state. For
-memory binding semantics, this state includes the type that the memory
-was previously bound to. The token cannot, however, be used to
-retrieve a metatype. It's value is only meaningful to the Swift
-runtime for typed pointer verification.
+Produces a opaque token representing the previous memory state for
+memory binding semantics. This abstract state includes the type that
+the memory was previously bound to along with the size of the affected
+memory region, which can be derived from ``%1``. The token cannot, for
+example, be used to retrieve a metatype. It only serves a purpose when
+used by ``rebind_memory``, which has no static type information. The
+token dynamically passes type information from the first bind_memory
+into a chain of rebind_memory operations.
+
+Example::
+
+  %_      = bind_memory %0   : $Builtin.RawPointer, %numT : $Builtin.Word to $T // holds type 'T'
+  %token0 = bind_memory %0   : $Builtin.RawPointer, %numU : $Builtin.Word to $U // holds type 'U'
+  %token1 = rebind_memory %0 : $Builtin.RawPointer, %token0 : $Builtin.Word  // holds type 'T'
+  %token2 = rebind_memory %0 : $Builtin.RawPointer, %token1 : $Builtin.Word  // holds type 'U'
+
 
 rebind_memory
 `````````````
@@ -4341,8 +4428,8 @@ This instruction's semantics are identical to ``bind_memory``, except
 that the types to which memory will be bound, and the extent of the
 memory region is unknown at compile time. Instead, the bound-types are
 represented by a token that was produced by a prior memory binding
-operation. ``%in_token`` must be the result of bind_memory or
-rebind_memory.
+operation. ``%in_token`` must be the result of ``bind_memory`` or
+``rebind_memory``.
 
 begin_access
 ````````````
@@ -4816,36 +4903,6 @@ swift closures to Objective C. A mandatory SIL pass will lower this instruction
 into a ``copy_block`` and a ``is_escaping``/``cond_fail``/``destroy_value`` at
 the end of the lifetime of the objective c closure parameter to check whether
 the sentinel closure was escaped.
-
-builtin "unsafeGuaranteed"
-``````````````````````````
-
-::
-
-  sil-instruction := 'builtin' '"unsafeGuaranteed"' '<' sil-type '>' '(' sil-operand')' ':' sil-type
-
-  %1 = builtin "unsafeGuaranteed"<T>(%0 : $T) : ($T, Builtin.Int1)
-  // $T must be of AnyObject type.
-
-Asserts that there exists another reference of the value ``%0`` for the scope
-delineated by the call of this builtin up to the first call of a ``builtin
-"unsafeGuaranteedEnd"`` instruction that uses the second element ``%1.1`` of the
-returned value. If no such instruction can be found nothing can be assumed. This
-assertion holds for uses of the first tuple element of the returned value
-``%1.0`` within this scope. The returned reference value equals the input
-``%0``.
-
-builtin "unsafeGuaranteedEnd"
-`````````````````````````````
-
-::
-
-  sil-instruction := 'builtin' '"unsafeGuaranteedEnd"' '(' sil-operand')'
-
-  %1 = builtin "unsafeGuaranteedEnd"(%0 : $Builtin.Int1)
-  // $T must be of AnyObject type.
-
-Ends the scope for the ``builtin "unsafeGuaranteed"`` instruction.
 
 Literals
 ~~~~~~~~
@@ -5557,6 +5614,8 @@ independent of the operand. In terms of specific types:
 In ownership qualified functions, a ``copy_value`` produces a +1 value that must
 be consumed at most once along any path through the program.
 
+It is illegal in non-Raw SIL to `copy_value`_ a value that is "move only".
+
 explicit_copy_value
 ```````````````````
 
@@ -5566,26 +5625,17 @@ explicit_copy_value
 
    %1 = explicit_copy_value %0 : $A
 
-Performs a copy of a loadable value as if by the value's type lowering and
-returns the copy. The returned copy semantically is a value that is completely
-independent of the operand. In terms of specific types:
-
-1. For trivial types, this is equivalent to just propagating through the trivial
-   value.
-2. For reference types, this is equivalent to performing a ``strong_retain``
-   operation and returning the reference.
-3. For ``@unowned`` types, this is equivalent to performing an
-   ``unowned_retain`` and returning the operand.
-4. For aggregate types, this is equivalent to recursively performing a
-   ``copy_value`` on its components, forming a new aggregate from the copied
-   components, and then returning the new aggregate.
-
-In ownership qualified functions, a ``explicit_copy_value`` produces a +1 value
-that must be consumed at most once along any path through the program.
-
-When move only variable checking is performed, ``explicit_copy_value`` is
+This is exactly the same instruction semantically as `copy_value`_ with the
+exception that when move only checking is performed, `explicit_copy_value`_ is
 treated as an explicit copy asked for by the user that should not be rewritten
 and should be treated as a non-consuming use.
+
+This is used for two things:
+
+1. Implementing a copy builtin for no implicit copy types.
+2. To enable the move checker, once it has emitted an error diagnostic, to still
+   produce valid Ownership SSA SIL at the end of the guaranteed optimization
+   pipeline when we enter the Canonical SIL stage.
 
 move_value
 ``````````
@@ -6523,7 +6573,7 @@ address_to_pointer
 ``````````````````
 ::
 
-  sil-instruction ::= 'address_to_pointer' sil-operand 'to' sil-type
+  sil-instruction ::= 'address_to_pointer' ('[' 'stack_protection' ']')? sil-operand 'to' sil-type
 
   %1 = address_to_pointer %0 : $*T to $Builtin.RawPointer
   // %0 must be of an address type $*T
@@ -6534,6 +6584,9 @@ Converting the result pointer back to an address of the same type will give
 an address equivalent to ``%0``. It is undefined behavior to cast the
 ``RawPointer`` to any address type other than its original address type or
 any `layout compatible types`_.
+
+The ``stack_protection`` flag indicates that stack protection is done for
+the pointer origin.
 
 pointer_to_address
 ``````````````````

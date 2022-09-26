@@ -317,6 +317,10 @@ def enable_resilience : Flag<["-"], "enable-resilience">,
 def enable_experimental_async_top_level :
   Flag<["-"], "enable-experimental-async-top-level">,
   HelpText<"Enable experimental concurrency in top-level code">;
+
+def enable_experimental_layout_prespecialization :
+  Flag<["-"], "enable-experimental-layout-prespecialization">,
+  HelpText<"Enable experimental support for layout based pre-specializations">;
 }
 
 // HIDDEN FLAGS
@@ -578,6 +582,10 @@ def enable_experimental_variadic_generics :
 def enable_experimental_associated_type_inference :
   Flag<["-"], "enable-experimental-associated-type-inference">,
   HelpText<"Enable experimental associated type inference via type witness systems">;
+
+def enable_experimental_implicit_some :
+  Flag<["-"], "enable-experimental-implicit-some">,
+  HelpText<"Enable experimental implicit some">;
 
 def disable_availability_checking : Flag<["-"],
   "disable-availability-checking">,
@@ -877,6 +885,10 @@ def compile_module_from_interface :
   HelpText<"Treat the (single) input as a swiftinterface and produce a module">,
   ModeOpt;
 
+def explicit_interface_module_build :
+  Flag<["-"], "explicit-interface-module-build">,
+  HelpText<"Use the specified command-line to build the module from interface, instead of flags specified in the interface">;
+
 def build_module_from_parseable_interface :
   Flag<["-"], "build-module-from-parseable-interface">,
   Alias<compile_module_from_interface>,
@@ -895,6 +907,11 @@ def module_interface_preserve_types_as_written :
 def experimental_spi_imports :
   Flag<["-"], "experimental-spi-imports">,
   HelpText<"Enable experimental support for SPI imports">;
+
+def disable_print_missing_imports_in_module_interface :
+  Flag<["-"], "disable-print-missing-imports-in-module-interface">,
+  HelpText<"Disable adding to the module interface imports used from API and "
+           "missing from the sources">;
 
 // [FIXME: Clang-type-plumbing] Make this a SIL-only option once we start
 // unconditionally emitting non-canonical Clang types in swiftinterfaces.
@@ -1065,9 +1082,11 @@ def clang_header_expose_public_decls:
   HelpText<"Expose all public declarations in the generated clang header">,
   Flags<[FrontendOption, HelpHidden]>;
   
-def enable_ad_hoc_availability :
-  Flag<["-"], "enable-ad-hoc-availability">,
-  HelpText<"Enable experimental support for ad hoc availability">;
+def weak_link_at_target :
+  Flag<["-"], "weak-link-at-target">,
+  HelpText<"Weakly link symbols for declarations that were introduced at the "
+           "deployment target. Symbols introduced before the deployment "
+           "target are still strongly linked.">;
 
 def concurrency_model :
     Separate<["-"], "concurrency-model">,
@@ -1077,10 +1096,30 @@ def concurrency_model_EQ :
     Joined<["-"], "concurrency-model=">,
     Alias<concurrency_model>;
 
+def enable_stack_protector :
+  Flag<["-"], "enable-stack-protector">,
+  HelpText<"Enable the stack protector">;
+def disable_stack_protector :
+  Flag<["-"], "disable-stack-protector">,
+  HelpText<"Disable the stack-protector">;
+
 def enable_new_llvm_pass_manager :
   Flag<["-"], "enable-new-llvm-pass-manager">,
   HelpText<"Enable the new llvm pass manager">;
 def disable_new_llvm_pass_manager :
   Flag<["-"], "disable-new-llvm-pass-manager">,
   HelpText<"Disable the new llvm pass manager">;
+
+def disable_emit_generic_class_ro_t_list :
+  Flag<["-"], "disable-emit-generic-class-ro_t-list">,
+  HelpText<"Disable emission of a section with references to class_ro_t of "
+           "generic class patterns">;
+def enable_emit_generic_class_ro_t_list :
+  Flag<["-"], "enable-emit-generic-class-ro_t-list">,
+  HelpText<"Enable emission of a section with references to class_ro_t of "
+           "generic class patterns">;
+
+def experimental_spi_only_imports :
+  Flag<["-"], "experimental-spi-only-imports">,
+  HelpText<"Enable use of @_spiOnly imports">;
 } // end let Flags = [FrontendOption, NoDriverOption, HelpHidden]

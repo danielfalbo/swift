@@ -83,6 +83,7 @@ bool ArgsToFrontendOptionsConverter::convert(
   Opts.EnablePrivateImports |= Args.hasArg(OPT_enable_private_imports);
   Opts.EnableLibraryEvolution |= Args.hasArg(OPT_enable_library_evolution);
   Opts.FrontendParseableOutput |= Args.hasArg(OPT_frontend_parseable_output);
+  Opts.ExplicitInterfaceBuild |= Args.hasArg(OPT_explicit_interface_module_build);
 
   // FIXME: Remove this flag
   Opts.EnableLibraryEvolution |= Args.hasArg(OPT_enable_resilience);
@@ -92,6 +93,10 @@ bool ArgsToFrontendOptionsConverter::convert(
   if (Args.hasArg(OPT_track_system_dependencies)) {
     Opts.IntermoduleDependencyTracking =
         IntermoduleDepTrackingMode::IncludeSystem;
+  } else if (Args.hasArg(OPT_explicit_interface_module_build)) {
+    // Always track at least the non-system dependencies for interface building.
+    Opts.IntermoduleDependencyTracking =
+        IntermoduleDepTrackingMode::ExcludeSystem;
   }
 
   if (const Arg *A = Args.getLastArg(OPT_bad_file_descriptor_retry_count)) {
@@ -231,6 +236,9 @@ bool ArgsToFrontendOptionsConverter::convert(
     return true;
 
   if (checkUnusedSupplementaryOutputPaths())
+    return true;
+
+  if (checkBuildFromInterfaceOnlyOptions())
     return true;
 
   if (FrontendOptions::doesActionGenerateIR(Opts.RequestedAction)) {
@@ -612,6 +620,17 @@ bool ArgsToFrontendOptionsConverter::
   Opts.InputsAndOutputs.setMainAndSupplementaryOutputs(mainOutputs,
                                                        supplementaryOutputs,
                                                        mainOutputForIndexUnits);
+  return false;
+}
+
+bool ArgsToFrontendOptionsConverter::checkBuildFromInterfaceOnlyOptions()
+    const {
+  if (Opts.RequestedAction != FrontendOptions::ActionType::CompileModuleFromInterface &&
+      Opts.ExplicitInterfaceBuild) {
+    Diags.diagnose(SourceLoc(),
+                   diag::error_cannot_explicit_interface_build_in_mode);
+    return true;
+  }
   return false;
 }
 

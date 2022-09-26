@@ -82,6 +82,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#define DEBUG_TYPE "silgen-poly"
 #include "ExecutorBreadcrumb.h"
 #include "Initialization.h"
 #include "LValue.h"
@@ -934,9 +935,8 @@ namespace {
           assert(!param.isInOut());
           elts.emplace_back(param.getParameterType());
         }
-        auto outputSubstType = cast<TupleType>(
-          TupleType::get(elts, SGF.getASTContext())
-            ->getCanonicalType());
+        auto outputSubstType = CanTupleType(
+          TupleType::get(elts, SGF.getASTContext()));
 
         // Translate the input tuple value into the output tuple value. Note
         // that the output abstraction pattern is a tuple, and we explode tuples
@@ -1192,8 +1192,6 @@ namespace {
                                     CanTupleType inputTupleType,
                                     AbstractionPattern outputOrigType,
                                     CanTupleType outputTupleType) {
-      assert(!inputTupleType->hasElementWithOwnership() &&
-             !outputTupleType->hasElementWithOwnership());
       assert(inputTupleType->getNumElements() ==
              outputTupleType->getNumElements());
 
@@ -1282,8 +1280,6 @@ namespace {
                                    CanTupleType outputSubstType) {
       assert(inputOrigType.matchesTuple(inputSubstType));
       assert(outputOrigType.matchesTuple(outputSubstType));
-      assert(!inputSubstType->hasElementWithOwnership() &&
-             !outputSubstType->hasElementWithOwnership());
       assert(inputSubstType->getNumElements() ==
              outputSubstType->getNumElements());
 
@@ -1304,8 +1300,6 @@ namespace {
                                   ManagedValue inputTupleAddr) {
       assert(inputOrigType.isTypeParameter());
       assert(outputOrigType.matchesTuple(outputSubstType));
-      assert(!inputSubstType->hasElementWithOwnership() &&
-             !outputSubstType->hasElementWithOwnership());
       assert(inputSubstType->getNumElements() ==
              outputSubstType->getNumElements());
 
@@ -1351,8 +1345,6 @@ namespace {
                                  TemporaryInitialization &tupleInit) {
       assert(inputOrigType.matchesTuple(inputSubstType));
       assert(outputOrigType.matchesTuple(outputSubstType));
-      assert(!inputSubstType->hasElementWithOwnership() &&
-             !outputSubstType->hasElementWithOwnership());
       assert(inputSubstType->getNumElements() ==
              outputSubstType->getNumElements());
 
@@ -3064,6 +3056,24 @@ static ManagedValue createThunk(SILGenFunction &SGF,
   auto substSourceType = fn.getType().castTo<SILFunctionType>();
   auto substExpectedType = expectedTL.getLoweredType().castTo<SILFunctionType>();
   
+  LLVM_DEBUG(llvm::dbgs() << "=== Generating reabstraction thunk from:\n";
+             substSourceType.dump(llvm::dbgs());
+             llvm::dbgs() << "\n    to:\n";
+             substExpectedType.dump(llvm::dbgs());
+             llvm::dbgs() << "\n    for source location:\n";
+             if (auto d = loc.getAsASTNode<Decl>()) {
+               d->dump(llvm::dbgs());
+             } else if (auto e = loc.getAsASTNode<Expr>()) {
+               e->dump(llvm::dbgs());
+             } else if (auto s = loc.getAsASTNode<Stmt>()) {
+               s->dump(llvm::dbgs());
+             } else if (auto p = loc.getAsASTNode<Pattern>()) {
+               p->dump(llvm::dbgs());
+             } else {
+               loc.dump();
+             }
+             llvm::dbgs() << "\n");
+  
   // Apply substitutions in the source and destination types, since the thunk
   // doesn't change because of different function representations.
   CanSILFunctionType sourceType;
@@ -4446,6 +4456,7 @@ void SILGenFunction::emitProtocolWitness(
 
     // For an instance actor, get the actor 'self'.
     if (*enterIsolation == ActorIsolation::ActorInstance) {
+      assert(enterIsolation->getActorInstanceParameter() == 0 && "Not self?");
       auto actorSelfVal = origParams.back();
 
       if (actorSelfVal.getType().isAddress()) {

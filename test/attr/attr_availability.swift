@@ -20,6 +20,9 @@ func noKind() {}
 @available(badPlatform, unavailable) // expected-warning {{unknown platform 'badPlatform' for attribute 'available'}}
 func unavailable_bad_platform() {}
 
+@available(macos, unavailable) // expected-warning {{unknown platform 'macos' for attribute 'available'; did you mean 'macOS'?}} {{12-17=macOS}}
+func incorrect_platform_case() {}
+
 // Handle unknown platform.
 @available(HAL9000, unavailable) // expected-warning {{unknown platform 'HAL9000'}}
 func availabilityUnknownPlatform() {}
@@ -223,6 +226,12 @@ func shortFormWithUnrecognizedPlatform() {
 // expected-warning@-1 {{unrecognized platform name 'iDishwasherOS'}}
 // expected-warning@-2 {{unrecognized platform name 'iRefrigeratorOS'}}
 func shortFormWithTwoUnrecognizedPlatforms() {
+}
+
+@available(ios 8.0, macos 10.12, *)
+// expected-warning@-1 {{unrecognized platform name 'ios'; did you mean 'iOS'?}}
+// expected-warning@-2 {{unrecognized platform name 'macos'; did you mean 'macOS'?}}
+func shortFormWithTwoPlatformsIncorrectCase() {
 }
 
 // Make sure that even after the parser hits an unrecognized
@@ -1056,15 +1065,17 @@ class SubInheritedDeprecatedInit: BaseDeprecatedInit { }
 
 _ = SubInheritedDeprecatedInit(bad: 0) // expected-warning {{'init(bad:)' is deprecated}}
 
+// https://github.com/apple/swift/issues/51149
 // Should produce no warnings.
-enum SR8634_Enum: Int {
+
+enum Enum_51149: Int {
   case a
   @available(*, deprecated, message: "I must not be raised in synthesized code")
   case b
   case c
 }
 
-struct SR8634_Struct: Equatable {
+struct Struct_51149: Equatable {
   @available(*, deprecated, message: "I must not be raised in synthesized code", renamed: "x")
   let a: Int
 }

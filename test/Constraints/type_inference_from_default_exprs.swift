@@ -178,7 +178,7 @@ func test_magic_defaults() {
   let _: String = generic_with_magic()
 }
 
-// SR-16069
+// https://github.com/apple/swift/issues/58330
 func test_allow_same_type_between_dependent_types() {
   struct Default : P {
     typealias X = Int
@@ -232,4 +232,24 @@ class BaseStorage<T> : Storage, StorageType {
 }
 
 final class CustomStorage<T>: BaseStorage<T> { // Ok - no crash typechecking inherited init
+}
+
+// https://github.com/apple/swift/issues/61061
+
+struct S61061<T> where T:Hashable { // expected-note{{'T' declared as parameter to type 'S61061'}}
+  init(x:[[T: T]] = [:]) {} // expected-error{{default argument value of type '[AnyHashable : Any]' cannot be converted to type '[[T : T]]'}}
+  // expected-error@-1{{generic parameter 'T' could not be inferred}}
+}
+
+struct S61061_1<T> where T:Hashable { // expected-note{{'T' declared as parameter to type 'S61061_1'}}
+  init(x:[(T, T)] = [:]) {} // expected-error{{default argument value of type '[AnyHashable : Any]' cannot be converted to type '[(T, T)]'}}
+  // expected-error@-1{{generic parameter 'T' could not be inferred}}
+}
+
+struct S61061_2<T> where T:Hashable {
+  init(x:[(T, T)] = [(1, "")]) {} // expected-error{{conflicting arguments to generic parameter 'T' ('String' vs. 'Int')}}
+}
+
+struct S61061_3<T> where T:Hashable {
+  init(x:[(T, T)] = [(1, 1)]) {} // OK
 }

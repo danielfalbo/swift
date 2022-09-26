@@ -97,6 +97,7 @@ import IntegerParsing
 import Integrate
 import IterateData
 import Join
+import KeyPathPerformanceTests
 import LazyFilter
 import LinkedList
 import LuhnAlgoEager
@@ -164,6 +165,7 @@ import SequenceAlgos
 import SetTests
 import SevenBoom
 import Sim2DArray
+import SimpleArraySpecialization
 import SortArrayInClass
 import SortIntPyramids
 import SortLargeExistentials
@@ -279,6 +281,7 @@ register(Integrate.benchmarks)
 register(IterateData.benchmarks)
 register(Join.benchmarks)
 register(LazyFilter.benchmarks)
+register(KeyPathPerformanceTests.benchmarks)
 register(LinkedList.benchmarks)
 register(LuhnAlgoEager.benchmarks)
 register(LuhnAlgoLazy.benchmarks)
@@ -346,6 +349,7 @@ register(SequenceAlgos.benchmarks)
 register(SetTests.benchmarks)
 register(SevenBoom.benchmarks)
 register(Sim2DArray.benchmarks)
+register(SimpleArraySpecialization.benchmarks)
 register(SortArrayInClass.benchmarks)
 register(SortIntPyramids.benchmarks)
 register(SortLargeExistentials.benchmarks)

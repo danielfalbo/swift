@@ -193,8 +193,17 @@ struct PointerAuthOptions : clang::PointerAuthOptions {
   /// Extended existential type shapes in flight.
   PointerAuthSchema ExtendedExistentialTypeShape;
 
+  // The c type descriminator for TaskContinuationFunction*.
+  PointerAuthSchema ClangTypeTaskContinuationFunction;
+
   /// Non-unique extended existential type shapes in flight.
   PointerAuthSchema NonUniqueExtendedExistentialTypeShape;
+
+  /// C type GetExtraInhabitantTag function descriminator.
+  PointerAuthSchema GetExtraInhabitantTagFunction;
+
+  /// C type StoreExtraInhabitantTag function descriminator.
+  PointerAuthSchema StoreExtraInhabitantTagFunction;
 };
 
 enum class JITDebugArtifact : unsigned {
@@ -401,6 +410,9 @@ public:
   /// Internalize symbols (static library) - do not export any public symbols.
   unsigned InternalizeSymbols : 1;
 
+  /// Emit a section with references to class_ro_t* in generic class patterns.
+  unsigned EmitGenericRODatas : 1;
+
   /// Whether to avoid emitting zerofill globals as preallocated type metadata
   /// and protocol conformance caches.
   unsigned NoPreallocatedInstantiationCaches : 1;
@@ -454,10 +466,10 @@ public:
         DebugInfoFormat(IRGenDebugInfoFormat::None),
         DisableClangModuleSkeletonCUs(false), UseJIT(false),
         DisableLLVMOptzns(false), DisableSwiftSpecificLLVMOptzns(false),
-        Playground(false), EmitStackPromotionChecks(false),
-        UseSingleModuleLLVMEmission(false), FunctionSections(false),
-        PrintInlineTree(false), EmbedMode(IRGenEmbedMode::None),
-        LLVMLTOKind(IRGenLLVMLTOKind::None),
+        Playground(false),
+        EmitStackPromotionChecks(false), UseSingleModuleLLVMEmission(false),
+        FunctionSections(false), PrintInlineTree(false),
+        EmbedMode(IRGenEmbedMode::None), LLVMLTOKind(IRGenLLVMLTOKind::None),
         SwiftAsyncFramePointer(SwiftAsyncFramePointerKind::Auto),
         HasValueNamesSetting(false), ValueNames(false),
         ReflectionMetadata(ReflectionMetadataMode::Runtime),
@@ -475,7 +487,7 @@ public:
         EnableGlobalISel(false), VirtualFunctionElimination(false),
         WitnessMethodElimination(false), ConditionalRuntimeRecords(false),
         InternalizeAtLink(false), InternalizeSymbols(false),
-        NoPreallocatedInstantiationCaches(false),
+        EmitGenericRODatas(false), NoPreallocatedInstantiationCaches(false),
         DisableReadonlyStaticObjects(false), CmdArgs(),
         SanitizeCoverage(llvm::SanitizerCoverageOptions()),
         TypeInfoFilter(TypeInfoDumpFilter::All) {

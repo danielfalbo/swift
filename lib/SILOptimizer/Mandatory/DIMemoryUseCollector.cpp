@@ -169,6 +169,25 @@ SILInstruction *DIMemoryObjectInfo::getFunctionEntryPoint() const {
   return &*getFunction().begin()->begin();
 }
 
+static SingleValueInstruction *
+getUninitializedValue(MarkUninitializedInst *MemoryInst) {
+  SILValue inst = MemoryInst;
+  if (auto *bbi = MemoryInst->getSingleUserOfType<BeginBorrowInst>()) {
+    inst = bbi;
+  }
+
+  if (SingleValueInstruction *svi =
+          inst->getSingleUserOfType<ProjectBoxInst>()) {
+    return svi;
+  }
+
+  return MemoryInst;
+}
+
+SingleValueInstruction *DIMemoryObjectInfo::getUninitializedValue() const {
+  return ::getUninitializedValue(MemoryInst);
+}
+
 /// Given a symbolic element number, return the type of the element.
 static SILType getElementTypeRec(TypeExpansionContext context,
                                  SILModule &Module, SILType T, unsigned EltNo,
@@ -478,6 +497,31 @@ bool DIMemoryObjectInfo::isElementLetProperty(unsigned Element) const {
   return false;
 }
 
+SingleValueInstruction *DIMemoryObjectInfo::findUninitializedSelfValue() const {
+  // If the object is 'self', return its uninitialized value.
+  if (isAnyInitSelf())
+    return getUninitializedValue();
+
+  // Otherwise we need to scan entry block to find mark_uninitialized
+  // instruction that belongs to `self`.
+
+  auto *BB = getFunction().getEntryBlock();
+  if (!BB)
+    return nullptr;
+
+  for (auto &I : *BB) {
+    SILInstruction *Inst = &I;
+    if (auto *MUI = dyn_cast<MarkUninitializedInst>(Inst)) {
+      // If instruction is not a local variable, it could only
+      // be some kind of `self` (root, delegating, derived etc.)
+      // see \c MarkUninitializedInst::Kind for more details.
+      if (!MUI->isVar())
+        return ::getUninitializedValue(MUI);
+    }
+  }
+  return nullptr;
+}
+
 ConstructorDecl *DIMemoryObjectInfo::getActorInitSelf() const {
   // is it 'self'?
   if (!MemoryInst->isVar())
@@ -744,6 +788,12 @@ void ElementUseCollector::collectUses(SILValue Pointer, unsigned BaseEltNo) {
 
     // Ignore end_access.
     if (isa<EndAccessInst>(User)) {
+      continue;
+    }
+
+    // Look through mark_must_check. To us, it is not interesting.
+    if (auto *mmi = dyn_cast<MarkMustCheckInst>(User)) {
+      collectUses(mmi, BaseEltNo);
       continue;
     }
 
@@ -1585,6 +1635,12 @@ collectDelegatingInitUses(const DIMemoryObjectInfo &TheMemory,
     // Look through begin_access
     if (auto *BAI = dyn_cast<BeginAccessInst>(User)) {
       collectDelegatingInitUses(TheMemory, UseInfo, BAI);
+      continue;
+    }
+
+    // Look through mark_must_check.
+    if (auto *MMCI = dyn_cast<MarkMustCheckInst>(User)) {
+      collectDelegatingInitUses(TheMemory, UseInfo, MMCI);
       continue;
     }
 

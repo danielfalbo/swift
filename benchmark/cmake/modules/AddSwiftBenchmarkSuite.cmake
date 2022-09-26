@@ -106,7 +106,7 @@ endmacro()
 
 macro(configure_sdks_darwin)
   set(macosx_arch "x86_64" "arm64")
-  set(iphoneos_arch "arm64" "arm64e" "armv7")
+  set(iphoneos_arch "arm64" "arm64e")
   set(appletvos_arch "arm64")
   set(watchos_arch "armv7k" "arm64_32")
 
@@ -354,7 +354,8 @@ function (swift_benchmark_compile_archopts)
   set(common_options
       "-c"
       "-target" "${target}"
-      "-${BENCH_COMPILE_ARCHOPTS_OPT}" ${PAGE_ALIGNMENT_OPTION})
+      "-${BENCH_COMPILE_ARCHOPTS_OPT}" ${PAGE_ALIGNMENT_OPTION}
+      "-Xfrontend" "-enable-experimental-layout-prespecialization")
 
   if(SWIFT_BENCHMARK_GENERATE_DEBUG_INFO)
     list(APPEND common_options "-g")

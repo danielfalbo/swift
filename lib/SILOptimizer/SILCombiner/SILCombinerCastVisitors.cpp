@@ -291,7 +291,8 @@ SILCombiner::optimizeAlignment(PointerToAddressInst *ptrAdrInst) {
   if (match(alignOper,
             m_ApplyInst(BuiltinValueKind::Alignof))) {
     CanType formalType = cast<BuiltinInst>(alignOper)->getSubstitutions()
-      .getReplacementTypes()[0]->getCanonicalType(ptrAdrInst->getFunction()->getGenericSignature());
+      .getReplacementTypes()[0]->getReducedType(
+          ptrAdrInst->getFunction()->getGenericSignature());
 
     SILType instanceType = ptrAdrInst->getFunction()->getLoweredType(
       Lowering::AbstractionPattern::getOpaque(), formalType);
@@ -415,7 +416,8 @@ visitPointerToAddressInst(PointerToAddressInst *PTAI) {
         auto DistanceAsWord = Builder.createBuiltin(
             PTAI->getLoc(), Trunc->getName(), Trunc->getType(), {}, Distance);
 
-        return Builder.createIndexAddr(PTAI->getLoc(), NewPTAI, DistanceAsWord);
+        return Builder.createIndexAddr(PTAI->getLoc(), NewPTAI, DistanceAsWord,
+                                       /*needsStackProtection=*/ false);
       }
     }
   }
@@ -461,7 +463,8 @@ visitPointerToAddressInst(PointerToAddressInst *PTAI) {
       auto *NewPTAI =
         Builder.createPointerToAddress(PTAI->getLoc(), Ptr, PTAI->getType(),
                                        PTAI->isStrict(), PTAI->isInvariant());
-      return Builder.createIndexAddr(PTAI->getLoc(), NewPTAI, Distance);
+      return Builder.createIndexAddr(PTAI->getLoc(), NewPTAI, Distance,
+                                     /*needsStackProtection=*/ false);
     }
   }
 

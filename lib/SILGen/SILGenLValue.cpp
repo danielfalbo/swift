@@ -23,6 +23,7 @@
 #include "LValue.h"
 #include "RValue.h"
 #include "SILGen.h"
+#include "SILGenFunction.h"
 #include "Scope.h"
 #include "swift/AST/DiagnosticsCommon.h"
 #include "swift/AST/DiagnosticsSIL.h"
@@ -35,6 +36,7 @@
 #include "swift/SIL/SILArgument.h"
 #include "swift/SIL/SILUndef.h"
 #include "swift/SIL/TypeLowering.h"
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/raw_ostream.h"
 using namespace swift;
 using namespace Lowering;
@@ -323,6 +325,11 @@ public:
   LValue visitKeyPathApplicationExpr(KeyPathApplicationExpr *e,
                                      SGFAccessKind accessKind,
                                      LValueOptions options);
+  LValue visitMoveExpr(MoveExpr *e, SGFAccessKind accessKind,
+                       LValueOptions options);
+  LValue visitABISafeConversionExpr(ABISafeConversionExpr *e,
+                                    SGFAccessKind accessKind,
+                                    LValueOptions options);
 
   // Expressions that wrap lvalues
   
@@ -1644,23 +1651,13 @@ namespace {
       RValue rvalue;
       FormalEvaluationScope scope(SGF);
 
-      // FIXME: This somewhat silly, because the original expression should
-      // already have one of these.
-      Optional<ImplicitActorHopTarget> implicitActorHopTarget;
-      if (ActorIso) {
-        implicitActorHopTarget = ActorIso->isGlobalActor()
-            ? ImplicitActorHopTarget::forGlobalActor(
-              ActorIso->getGlobalActor())
-            : ImplicitActorHopTarget::forInstanceSelf();
-      }
-
       auto args =
           std::move(*this).prepareAccessorArgs(SGF, loc, base, getter);
 
       rvalue = SGF.emitGetAccessor(
           loc, getter, Substitutions, std::move(args.base), IsSuper,
           IsDirectAccessorUse, std::move(args.Indices), c,
-          IsOnSelfParameter, implicitActorHopTarget);
+          IsOnSelfParameter, ActorIso);
 
       return rvalue;
     }
@@ -2198,6 +2195,85 @@ namespace {
 
     void dump(raw_ostream &OS, unsigned indent) const override {
       OS.indent(indent) << "PhysicalKeyPathApplicationComponent\n";
+    }
+  };
+
+  /// A translation component that performs \c unchecked_*_cast 's as-needed.
+  class UncheckedConversionComponent final : public TranslationPathComponent {
+  private:
+    Type OrigType;
+
+    /// \returns the type this component is trying to convert \b to
+    CanType getTranslatedType() const {
+      return getTypeData().SubstFormalType->getCanonicalType();
+    }
+
+    /// \returns the type this component is trying to convert \b from
+    CanType getUntranslatedType() const {
+      return OrigType->getRValueType()->getCanonicalType();
+    }
+
+    /// perform a conversion of ManagedValue -> ManagedValue
+    ManagedValue doUncheckedConversion(SILGenFunction &SGF, SILLocation loc,
+                                       ManagedValue val, CanType toType) {
+      auto toTy = SGF.getLoweredType(toType);
+      auto fromTy = val.getType();
+
+      if (fromTy == toTy)
+        return val; // nothing to do.
+
+      // otherwise emit the right kind of cast based on whether it's an address.
+      assert(fromTy.isAddress() == toTy.isAddress());
+
+      if (toTy.isAddress())
+        return SGF.B.createUncheckedAddrCast(loc, val, toTy);
+
+      return SGF.B.createUncheckedBitCast(loc, val, toTy);
+    }
+
+    /// perform a conversion of RValue -> RValue
+    RValue doUncheckedConversion(SILGenFunction &SGF, SILLocation loc,
+                                 RValue &&rv, CanType toType) {
+      auto val = std::move(rv).getAsSingleValue(SGF, loc);
+      val = doUncheckedConversion(SGF, loc, val, toType);
+      return RValue(SGF, loc, toType, val);
+    }
+
+  public:
+    /// \param OrigType is the type we are converting \b from
+    /// \param typeData will contain the type we are converting \b to
+    UncheckedConversionComponent(LValueTypeData typeData, Type OrigType)
+      : TranslationPathComponent(typeData, UncheckedConversionKind),
+      OrigType(OrigType) {}
+
+    bool isLoadingPure() const override { return true; }
+
+    /// Used during write operations to convert the value prior to writing to
+    /// the base.
+    RValue untranslate(SILGenFunction &SGF, SILLocation loc,
+                       RValue &&rv, SGFContext c) && override {
+      return doUncheckedConversion(SGF, loc, std::move(rv),
+                getUntranslatedType());
+    }
+
+    /// Used during read operations to convert the value after reading the base.
+    RValue translate(SILGenFunction &SGF, SILLocation loc,
+                     RValue &&rv, SGFContext c) && override {
+      return doUncheckedConversion(SGF, loc, std::move(rv),
+                getTranslatedType());
+    }
+
+    std::unique_ptr<LogicalPathComponent>
+    clone(SILGenFunction &SGF, SILLocation loc) const override {
+      return std::make_unique<UncheckedConversionComponent>(getTypeData(),
+                                                            OrigType);
+    }
+
+    void dump(raw_ostream &OS, unsigned indent) const override {
+      OS.indent(indent) << "UncheckedConversionComponent"
+                        << "\n\tfromType: " << getUntranslatedType()
+                        << "\n\ttoType: " << getTranslatedType()
+                        << "\n";
     }
   };
 } // end anonymous namespace
@@ -3707,6 +3783,40 @@ LValue SILGenLValue::visitBindOptionalExpr(BindOptionalExpr *e,
 LValue SILGenLValue::visitInOutExpr(InOutExpr *e, SGFAccessKind accessKind,
                                     LValueOptions options) {
   return visitRec(e->getSubExpr(), accessKind, options);
+}
+
+LValue SILGenLValue::visitMoveExpr(MoveExpr *e, SGFAccessKind accessKind,
+                                   LValueOptions options) {
+  // Do formal evaluation of the base l-value.
+  LValue baseLV = visitRec(e->getSubExpr(), SGFAccessKind::ReadWrite,
+                           options.forComputedBaseLValue());
+
+  ManagedValue addr = SGF.emitAddressOfLValue(e, std::move(baseLV));
+
+  // Now create the temporary and
+  auto temp =
+      SGF.emitFormalAccessTemporary(e, SGF.F.getTypeLowering(addr.getType()));
+  auto toAddr = temp->getAddressForInPlaceInitialization(SGF, e);
+  SGF.B.createMarkUnresolvedMoveAddr(e, addr.getValue(), toAddr);
+  temp->finishInitialization(SGF);
+
+  // Now return the temporary in a value component.
+  return LValue::forValue(SGFAccessKind::BorrowedAddressRead,
+                          temp->getManagedAddress(),
+                          toAddr->getType().getASTType());
+}
+
+LValue SILGenLValue::visitABISafeConversionExpr(ABISafeConversionExpr *e,
+                                    SGFAccessKind accessKind,
+                                    LValueOptions options) {
+  LValue lval = visitRec(e->getSubExpr(), accessKind, options);
+  auto typeData = getValueTypeData(SGF, accessKind, e);
+
+  auto OrigType = e->getSubExpr()->getType();
+
+  lval.add<UncheckedConversionComponent>(typeData, OrigType);
+
+  return lval;
 }
 
 /// Emit an lvalue that refers to the given property.  This is

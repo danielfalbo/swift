@@ -2110,16 +2110,18 @@ namespace {
       for (auto m : decl->decls()) {
         if (auto method = dyn_cast<clang::CXXMethodDecl>(m)) {
           if (method->getDeclName().isIdentifier()) {
-            if (Impl.cxxMethods.find(method->getName()) ==
-                Impl.cxxMethods.end()) {
-              Impl.cxxMethods[method->getName()] = {};
+            auto contextMap = Impl.cxxMethods.find(method->getDeclContext());
+            if (contextMap == Impl.cxxMethods.end() ||
+                contextMap->second.find(method->getName()) ==
+                    contextMap->second.end()) {
+              Impl.cxxMethods[method->getDeclContext()][method->getName()] = {};
             }
             if (method->isConst()) {
               // Add to const set
-              Impl.cxxMethods[method->getName()].first.insert(method);
+              Impl.cxxMethods[method->getDeclContext()][method->getName()].first.insert(method);
             } else {
               // Add to mutable set
-              Impl.cxxMethods[method->getName()].second.insert(method);
+              Impl.cxxMethods[method->getDeclContext()][method->getName()].second.insert(method);
             }
           }
         }
@@ -2219,7 +2221,21 @@ namespace {
               MD->overwriteAccess(AccessLevel::Private);
             } else if (cxxOperatorKind ==
                        clang::OverloadedOperatorKind::OO_PlusPlus) {
-              if (cxxMethod->param_empty()) {
+              // Make sure the type is not an immortal foreign reference type.
+              // We cannot handle `operator++` for those types, since the
+              // current implementation creates a new instance of the type.
+              bool isImmortal = false;
+              if (auto classDecl = dyn_cast<ClassDecl>(result)) {
+                auto retainOperation = evaluateOrDefault(
+                    Impl.SwiftContext.evaluator,
+                    CustomRefCountingOperation(
+                        {classDecl, CustomRefCountingOperationKind::retain}),
+                    {});
+                isImmortal = retainOperation.kind ==
+                             CustomRefCountingOperationResult::immortal;
+              }
+
+              if (cxxMethod->param_empty() && !isImmortal) {
                 // This is a pre-increment operator. We synthesize a
                 // non-mutating function called `successor() -> Self`.
                 FuncDecl *successorFunc = synthesizer.makeSuccessorFunc(MD);
@@ -2258,8 +2274,11 @@ namespace {
             }
 
             if (cxxMethod->getDeclName().isIdentifier()) {
-              auto &mutableFuncPtrs = Impl.cxxMethods[cxxMethod->getName()].second;
-              if(mutableFuncPtrs.contains(cxxMethod)) {
+              auto &mutableFuncPtrs =
+                  Impl.cxxMethods[cxxMethod->getDeclContext()]
+                                 [cxxMethod->getName()]
+                                     .second;
+              if (mutableFuncPtrs.contains(cxxMethod)) {
                 result->addMemberToLookupTable(member);
               }
             }
@@ -2607,6 +2626,7 @@ namespace {
       if (clangModule && requiresCPlusPlus(clangModule)) {
         if (auto structDecl = dyn_cast_or_null<NominalTypeDecl>(result)) {
           conformToCxxIteratorIfNeeded(Impl, structDecl, decl);
+          conformToCxxSequenceIfNeeded(Impl, structDecl, decl);
         }
       }
 
@@ -2677,17 +2697,6 @@ namespace {
       // instantiating.
       if (isSpecializationDepthGreaterThan(def, 8))
         return nullptr;
-
-      // If we have an inline data member, it won't get eagerly instantiated
-      // when we instantiate the class. So, make sure we do that now to catch
-      // any instantiation errors.
-      for (auto member : decl->decls()) {
-        if (auto varDecl = dyn_cast<clang::VarDecl>(member)) {
-          if (varDecl->getTemplateInstantiationPattern())
-            clangSema.InstantiateVariableDefinition(varDecl->getLocation(),
-                                                    varDecl);
-        }
-      }
 
       return VisitCXXRecordDecl(def);
     }
@@ -2977,7 +2986,7 @@ namespace {
       // In such a case append a suffix ("Mutating") to the mutable version
       // of the method when importing to swift
       if(decl->getDeclName().isIdentifier()) {
-        const auto &cxxMethodPair = Impl.cxxMethods[decl->getName()];
+        const auto &cxxMethodPair = Impl.cxxMethods[decl->getDeclContext()][decl->getName()];
         const auto &constFuncPtrs = cxxMethodPair.first;
         const auto &mutFuncPtrs = cxxMethodPair.second;
 
@@ -3384,7 +3393,6 @@ namespace {
     }
 
     Decl *VisitVarDecl(const clang::VarDecl *decl) {
-
       // Variables are imported as... variables.
       ImportedName importedName;
       Optional<ImportedName> correctSwiftName;
@@ -3396,34 +3404,6 @@ namespace {
           Impl.importDeclContextOf(decl, importedName.getEffectiveContext());
       if (!dc)
         return nullptr;
-
-      // If the declaration is const, consider it audited.
-      // We can assume that loading a const global variable doesn't
-      // involve an ownership transfer.
-      bool isAudited = decl->getType().isConstQualified();
-
-      auto declType = decl->getType();
-
-      // Special case: NS Notifications
-      if (isNSNotificationGlobal(decl))
-        if (auto newtypeDecl = findSwiftNewtype(decl, Impl.getClangSema(),
-                                                Impl.CurrentVersion))
-          declType = Impl.getClangASTContext().getTypedefType(newtypeDecl);
-
-      // Note that we deliberately don't bridge most globals because we want to
-      // preserve pointer identity.
-      auto importedType =
-          Impl.importType(declType,
-                          (isAudited ? ImportTypeKind::AuditedVariable
-                                     : ImportTypeKind::Variable),
-                          ImportDiagnosticAdder(Impl, decl, decl->getLocation()),
-                          isInSystemModule(dc), Bridgeability::None,
-                          getImportTypeAttrs(decl));
-
-      if (!importedType)
-        return nullptr;
-
-      auto type = importedType.getType();
 
       // If we've imported this variable as a member, it's a static
       // member.
@@ -3445,9 +3425,6 @@ namespace {
                        name, dc);
       result->setIsObjC(false);
       result->setIsDynamic(false);
-      result->setInterfaceType(type);
-      Impl.recordImplicitUnwrapForDecl(result,
-                                       importedType.isImplicitlyUnwrapped());
 
       // If imported as member, the member should be final.
       if (dc->getSelfClassDecl())
@@ -5452,8 +5429,9 @@ Decl *SwiftDeclConverter::importEnumCaseAlias(
                                             /*implicit*/ true);
     constantRef->setType(enumElt->getInterfaceType());
 
-    auto instantiate = DotSyntaxCallExpr::create(Impl.SwiftContext, constantRef,
-                                                 SourceLoc(), typeRef);
+    auto instantiate =
+        DotSyntaxCallExpr::create(Impl.SwiftContext, constantRef, SourceLoc(),
+                                  Argument::unlabeled(typeRef));
     instantiate->setType(importedEnumTy);
     instantiate->setThrows(false);
 
@@ -5700,14 +5678,35 @@ SwiftDeclConverter::getImplicitProperty(ImportedName importedName,
   if (dc->isTypeContext() && !getterName.getSelfIndex())
     isStatic = true;
 
-  // Compute the property type.
-  bool isFromSystemModule = isInSystemModule(dc);
-  auto importedType = Impl.importType(
-      propertyType, ImportTypeKind::Property,
-      ImportDiagnosticAdder(Impl, getter, getter->getLocation()),
-      Impl.shouldAllowNSUIntegerAsInt(isFromSystemModule, getter),
-      Bridgeability::Full, getImportTypeAttrs(accessor),
-      OTK_ImplicitlyUnwrappedOptional);
+  ImportedType importedType;
+
+  // Sometimes we import unavailable typedefs as enums. If that's the case,
+  // use the enum, not the typedef here.
+  if (auto typedefType = dyn_cast<clang::TypedefType>(propertyType.getTypePtr())) {
+    if (Impl.isUnavailableInSwift(typedefType->getDecl())) {
+      if (auto clangEnum = findAnonymousEnumForTypedef(Impl.SwiftContext, typedefType)) {
+        // If this fails, it means that we need a stronger predicate for
+        // determining the relationship between an enum and typedef.
+        assert(clangEnum.getValue()->getIntegerType()->getCanonicalTypeInternal() ==
+               typedefType->getCanonicalTypeInternal());
+        if (auto swiftEnum = Impl.importDecl(*clangEnum, Impl.CurrentVersion)) {
+          importedType = {cast<NominalTypeDecl>(swiftEnum)->getDeclaredType(), false};
+        }
+      }
+    }
+  }
+
+  if (!importedType) {
+    // Compute the property type.
+    bool isFromSystemModule = isInSystemModule(dc);
+    importedType = Impl.importType(
+        propertyType, ImportTypeKind::Property,
+        ImportDiagnosticAdder(Impl, getter, getter->getLocation()),
+        Impl.shouldAllowNSUIntegerAsInt(isFromSystemModule, getter),
+        Bridgeability::Full, getImportTypeAttrs(accessor),
+        OTK_ImplicitlyUnwrappedOptional);
+  }
+
   if (!importedType)
     return nullptr;
 
@@ -6570,8 +6569,8 @@ void SwiftDeclConverter::importObjCProtocols(
     SmallVectorImpl<InheritedEntry> &inheritedTypes) {
   SmallVector<ProtocolDecl *, 4> protocols;
   llvm::SmallPtrSet<ProtocolDecl *, 4> knownProtocols;
-  if (auto nominal = dyn_cast<NominalTypeDecl>(decl)) {
-    nominal->getImplicitProtocols(protocols);
+  if (auto classDecl = dyn_cast<ClassDecl>(decl)) {
+    classDecl->getImplicitProtocols(protocols);
     knownProtocols.insert(protocols.begin(), protocols.end());
   }
 

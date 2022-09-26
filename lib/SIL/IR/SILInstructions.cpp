@@ -169,10 +169,11 @@ SILDebugVariable::createFromAllocation(const AllocationInst *AI) {
   // TODO: Support AllocBoxInst
 
   if (!VarInfo)
-    return VarInfo;
+    return {};
 
-  // Copy everything but the DIExpr
-  VarInfo->DIExpr.clear();
+  // TODO: Support variables with expressions.
+  if (VarInfo->DIExpr)
+    return {};
 
   // Coalesce the debug loc attached on AI into VarInfo
   SILType Type = AI->getType();
@@ -436,6 +437,22 @@ BuiltinInst::BuiltinInst(SILDebugLocation Loc, Identifier Name,
                          ArrayRef<SILValue> Args)
     : InstructionBaseWithTrailingOperands(Args, Loc, ReturnType), Name(Name),
       Substitutions(Subs) {
+}
+
+IncrementProfilerCounterInst *IncrementProfilerCounterInst::create(
+    SILDebugLocation Loc, unsigned CounterIdx, StringRef PGOFuncName,
+    unsigned NumCounters, uint64_t PGOFuncHash, SILModule &M) {
+
+  auto PGOFuncNameLength = PGOFuncName.size();
+  auto Size = totalSizeToAlloc<char>(PGOFuncNameLength);
+  auto Buffer = M.allocateInst(Size, alignof(IncrementProfilerCounterInst));
+
+  auto *Inst = ::new (Buffer) IncrementProfilerCounterInst(
+      Loc, CounterIdx, PGOFuncNameLength, NumCounters, PGOFuncHash);
+
+  std::uninitialized_copy(PGOFuncName.begin(), PGOFuncName.end(),
+                          Inst->getTrailingObjects<char>());
+  return Inst;
 }
 
 InitBlockStorageHeaderInst *
@@ -1170,6 +1187,15 @@ CopyAddrInst::CopyAddrInst(SILDebugLocation Loc, SILValue SrcLValue,
     sharedUInt8().CopyAddrInst.isTakeOfSrc = bool(isTakeOfSrc);
     sharedUInt8().CopyAddrInst.isInitializationOfDest =
       bool(isInitializationOfDest);
+  }
+
+  ExplicitCopyAddrInst::ExplicitCopyAddrInst(
+      SILDebugLocation Loc, SILValue SrcLValue, SILValue DestLValue,
+      IsTake_t isTakeOfSrc, IsInitialization_t isInitializationOfDest)
+      : InstructionBase(Loc), Operands(this, SrcLValue, DestLValue) {
+    sharedUInt8().ExplicitCopyAddrInst.isTakeOfSrc = bool(isTakeOfSrc);
+    sharedUInt8().ExplicitCopyAddrInst.isInitializationOfDest =
+        bool(isInitializationOfDest);
   }
 
 BindMemoryInst *

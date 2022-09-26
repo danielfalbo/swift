@@ -386,7 +386,6 @@ struct ValueOwnershipKindBuiltinVisitor
 // This returns a value at +1 that is destroyed strictly /after/ the
 // UnsafeGuaranteedEnd. This provides the guarantee that we want.
 CONSTANT_OWNERSHIP_BUILTIN(Owned, COWBufferForReading)
-CONSTANT_OWNERSHIP_BUILTIN(Owned, UnsafeGuaranteed)
 CONSTANT_OWNERSHIP_BUILTIN(None, AShr)
 CONSTANT_OWNERSHIP_BUILTIN(None, GenericAShr)
 CONSTANT_OWNERSHIP_BUILTIN(None, Add)
@@ -507,7 +506,6 @@ CONSTANT_OWNERSHIP_BUILTIN(None, Unreachable)
 CONSTANT_OWNERSHIP_BUILTIN(None, AtomicRMW)
 
 CONSTANT_OWNERSHIP_BUILTIN(None, CondUnreachable)
-CONSTANT_OWNERSHIP_BUILTIN(None, UnsafeGuaranteedEnd)
 CONSTANT_OWNERSHIP_BUILTIN(None, GetObjCTypeEncoding)
 CONSTANT_OWNERSHIP_BUILTIN(None, CanBeObjCClass)
 CONSTANT_OWNERSHIP_BUILTIN(None, WillThrow)
@@ -534,7 +532,6 @@ CONSTANT_OWNERSHIP_BUILTIN(None, TSanInoutAccess)
 CONSTANT_OWNERSHIP_BUILTIN(None, Swift3ImplicitObjCEntrypoint)
 CONSTANT_OWNERSHIP_BUILTIN(None, PoundAssert)
 CONSTANT_OWNERSHIP_BUILTIN(None, TypePtrAuthDiscriminator)
-CONSTANT_OWNERSHIP_BUILTIN(None, IntInstrprofIncrement)
 CONSTANT_OWNERSHIP_BUILTIN(None, TargetOSVersionAtLeast)
 CONSTANT_OWNERSHIP_BUILTIN(None, GlobalStringTablePointer)
 CONSTANT_OWNERSHIP_BUILTIN(None, GetCurrentAsyncTask)
@@ -562,7 +559,6 @@ CONSTANT_OWNERSHIP_BUILTIN(None, EndAsyncLetLifetime)
 CONSTANT_OWNERSHIP_BUILTIN(None, CreateTaskGroup)
 CONSTANT_OWNERSHIP_BUILTIN(None, DestroyTaskGroup)
 CONSTANT_OWNERSHIP_BUILTIN(None, TaskRunInline)
-CONSTANT_OWNERSHIP_BUILTIN(None, Move)
 CONSTANT_OWNERSHIP_BUILTIN(None, Copy)
 
 #undef CONSTANT_OWNERSHIP_BUILTIN

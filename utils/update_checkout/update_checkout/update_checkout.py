@@ -461,7 +461,7 @@ def skip_list_for_platform(config, all_repos):
         return []  # Do not skip any platform-specific repositories
 
     # If there is a platforms key only include the repo if the
-    # plaform is in the list
+    # platform is in the list
     skip_list = []
     platform_name = platform.system()
 
@@ -509,7 +509,7 @@ repositories.
         action="append")
     parser.add_argument(
         "--all-repositories",
-        help="""Includes repositories not required for current platform. 
+        help="""Includes repositories not required for current platform.
         This will not override '--skip-repositories'""",
         action='store_true')
     parser.add_argument(

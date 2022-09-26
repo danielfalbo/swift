@@ -1368,12 +1368,14 @@ public:
     } else {
       // Ignore everything in getAccessProjectionOperand that is an access
       // projection with no affect on the access path.
-      assert(isa<OpenExistentialAddrInst>(projectedAddr)
-             || isa<InitEnumDataAddrInst>(projectedAddr)
-             || isa<UncheckedTakeEnumDataAddrInst>(projectedAddr)
+      assert(isa<OpenExistentialAddrInst>(projectedAddr) ||
+             isa<InitEnumDataAddrInst>(projectedAddr) ||
+             isa<UncheckedTakeEnumDataAddrInst>(projectedAddr)
              // project_box is not normally an access projection but we treat it
              // as such when it operates on unchecked_take_enum_data_addr.
-             || isa<ProjectBoxInst>(projectedAddr));
+             || isa<ProjectBoxInst>(projectedAddr)
+             // Ignore mark_must_check, we just look through it when we see it.
+             || isa<MarkMustCheckInst>(projectedAddr));
     }
     return sourceAddr->get();
   }
@@ -1412,6 +1414,10 @@ void swift::visitProductLeafAccessPathNodes(
     } else if (auto *decl = silType.getStructOrBoundGenericStruct()) {
       if (decl->isResilient(tec.getContext()->getParentModule(),
                             tec.getResilienceExpansion())) {
+        visitor(AccessPath::PathNode(node), silType);
+        continue;
+      }
+      if (decl->isCxxNonTrivial()) {
         visitor(AccessPath::PathNode(node), silType);
         continue;
       }
@@ -1858,7 +1864,14 @@ AccessPathDefUseTraversal::visitSingleValueUser(SingleValueInstruction *svi,
     return IgnoredUse;
   }
 
-  // MARK: Access projections
+  case SILInstructionKind::MarkMustCheckInst: {
+    // Mark must check goes on the project_box, so it isn't a ref.
+    assert(!dfs.isRef());
+    pushUsers(svi, dfs);
+    return IgnoredUse;
+  }
+
+    // MARK: Access projections
 
   case SILInstructionKind::StructElementAddrInst:
   case SILInstructionKind::TupleElementAddrInst:
@@ -1933,6 +1946,11 @@ bool AccessPathDefUseTraversal::visitUser(DFSEntry dfs) {
     if (use->getOperandNumber() == 0
         && visitSingleValueUser(svi, dfs) == IgnoredUse) {
       return true;
+    }
+  }
+  if (auto *sbi = dyn_cast<StoreBorrowInst>(use->getUser())) {
+    if (use->get() == sbi->getDest()) {
+      pushUsers(sbi, dfs);
     }
   }
   if (isa<EndBorrowInst>(use->getUser())) {
@@ -2103,6 +2121,7 @@ bool GatherUniqueStorageUses::visitUse(Operand *use, AccessUseType useTy) {
   case SILInstructionKind::InjectEnumAddrInst:
     return visitor.visitStore(use);
 
+  case SILInstructionKind::ExplicitCopyAddrInst:
   case SILInstructionKind::CopyAddrInst:
     if (operIdx == CopyLikeInstruction::Dest) {
       return visitor.visitStore(use);
@@ -2139,6 +2158,10 @@ bool swift::memInstMustInitialize(Operand *memOper) {
 
   case SILInstructionKind::CopyAddrInst: {
     auto *CAI = cast<CopyAddrInst>(memInst);
+    return CAI->getDest() == address && CAI->isInitializationOfDest();
+  }
+  case SILInstructionKind::ExplicitCopyAddrInst: {
+    auto *CAI = cast<ExplicitCopyAddrInst>(memInst);
     return CAI->getDest() == address && CAI->isInitializationOfDest();
   }
   case SILInstructionKind::MarkUnresolvedMoveAddrInst: {
@@ -2446,7 +2469,6 @@ static void visitBuiltinAddress(BuiltinInst *builtin,
       return;
 
     // These effect both operands.
-    case BuiltinValueKind::Move:
     case BuiltinValueKind::Copy:
       visitor(&builtin->getAllOperands()[1]);
       return;
@@ -2479,11 +2501,8 @@ static void visitBuiltinAddress(BuiltinInst *builtin,
     case BuiltinValueKind::Unreachable:
     case BuiltinValueKind::CondUnreachable:
     case BuiltinValueKind::DestroyArray:
-    case BuiltinValueKind::UnsafeGuaranteed:
-    case BuiltinValueKind::UnsafeGuaranteedEnd:
     case BuiltinValueKind::Swift3ImplicitObjCEntrypoint:
     case BuiltinValueKind::PoundAssert:
-    case BuiltinValueKind::IntInstrprofIncrement:
     case BuiltinValueKind::TSanInoutAccess:
     case BuiltinValueKind::CancelAsyncTask:
     case BuiltinValueKind::CreateAsyncTask:
@@ -2591,6 +2610,11 @@ void swift::visitAccessedAddress(SILInstruction *I,
     visitor(&I->getAllOperands()[CopyAddrInst::Dest]);
     return;
 
+  case SILInstructionKind::ExplicitCopyAddrInst:
+    visitor(&I->getAllOperands()[ExplicitCopyAddrInst::Src]);
+    visitor(&I->getAllOperands()[ExplicitCopyAddrInst::Dest]);
+    return;
+
   case SILInstructionKind::MarkUnresolvedMoveAddrInst:
     visitor(&I->getAllOperands()[MarkUnresolvedMoveAddrInst::Src]);
     visitor(&I->getAllOperands()[MarkUnresolvedMoveAddrInst::Dest]);
@@ -2675,6 +2699,7 @@ void swift::visitAccessedAddress(SILInstruction *I,
   case SILInstructionKind::PartialApplyInst:
   case SILInstructionKind::YieldInst:
   case SILInstructionKind::UnwindInst:
+  case SILInstructionKind::IncrementProfilerCounterInst:
   case SILInstructionKind::UncheckedOwnershipConversionInst:
   case SILInstructionKind::UncheckedRefCastAddrInst:
   case SILInstructionKind::UnconditionalCheckedCastAddrInst:

@@ -1492,7 +1492,7 @@ protocol HasMethodF {
 
 class TriesToConformWithFunctionIntroducedOn10_51 : HasMethodF {
   @available(OSX, introduced: 10.51)
-  func f(_ p: Int) { } // expected-error {{protocol 'HasMethodF' requires 'f' to be available in macOS 10.50.0 and newer}}
+  func f(_ p: Int) { } // expected-error {{protocol 'HasMethodF' requires 'f' to be available in macOS 10.50 and newer}}
 }
 
 
@@ -1508,7 +1508,7 @@ class SuperHasMethodF {
     func f(_ p: Int) { } // expected-note {{'f' declared here}}
 }
 
-class TriesToConformWithPotentiallyUnavailableFunctionInSuperClass : SuperHasMethodF, HasMethodF { // expected-error {{protocol 'HasMethodF' requires 'f' to be available in macOS 10.50.0 and newer}}
+class TriesToConformWithPotentiallyUnavailableFunctionInSuperClass : SuperHasMethodF, HasMethodF { // expected-error {{protocol 'HasMethodF' requires 'f' to be available in macOS 10.50 and newer}}
   // The conformance here is generating an error on f in the super class.
 }
 
@@ -1532,7 +1532,7 @@ class ConformsByOverridingFunctionInSuperClass : SuperHasMethodF, HasMethodF {
 class HasNoMethodF1 { }
 extension HasNoMethodF1 : HasMethodF {
   @available(OSX, introduced: 10.51)
-  func f(_ p: Int) { } // expected-error {{protocol 'HasMethodF' requires 'f' to be available in macOS 10.50.0 and newer}}
+  func f(_ p: Int) { } // expected-error {{protocol 'HasMethodF' requires 'f' to be available in macOS 10.50 and newer}}
 }
 
 class HasNoMethodF2 { }
@@ -1725,10 +1725,12 @@ struct HasUnavailableExtension {
 
 @available(OSX, unavailable)
 extension HasUnavailableExtension {
+    // expected-note@-1 {{enclosing scope has been explicitly marked unavailable here}}
+
   public func inheritsUnavailable() { }
       // expected-note@-1 {{'inheritsUnavailable()' has been explicitly marked unavailable here}}
 
-  @available(OSX 10.9, *)
+  @available(OSX 10.9, *) // expected-warning {{instance method cannot be more available than unavailable enclosing scope}}
   public func moreAvailableButStillUnavailable() { }
       // expected-note@-1 {{'moreAvailableButStillUnavailable()' has been explicitly marked unavailable here}}
 }

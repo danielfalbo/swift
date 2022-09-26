@@ -170,9 +170,9 @@ namespace swift {
     /// Only check the availability of the API, ignore function bodies.
     bool CheckAPIAvailabilityOnly = false;
 
-    /// Causes the compiler to treat declarations available at the current
-    /// runtime OS version as potentially unavailable.
-    bool EnableAdHocAvailability = false;
+    /// Causes the compiler to use weak linkage for symbols belonging to
+    /// declarations introduced at the deployment target.
+    bool WeakLinkAtTarget = false;
 
     /// Should conformance availability violations be diagnosed as errors?
     bool EnableConformanceAvailabilityErrors = false;
@@ -193,8 +193,9 @@ namespace swift {
     /// Enable 'availability' restrictions for App Extensions.
     bool EnableAppExtensionRestrictions = false;
 
-    /// Require public declarations to declare an introduction OS version.
-    bool RequireExplicitAvailability = false;
+    /// Diagnostic level to report when a public declarations doesn't declare
+    /// an introduction OS version.
+    Optional<DiagnosticBehavior> RequireExplicitAvailability = None;
 
     /// Introduction platform and version to suggest as fix-it
     /// when using RequireExplicitAvailability.
@@ -215,6 +216,9 @@ namespace swift {
 
     /// Emit a remark after loading a module.
     bool EnableModuleLoadingRemarks = false;
+    
+    /// Emit a remark on early exit in explicit interface build
+    bool EnableSkipExplicitInterfaceModuleBuildRemarks = false;
 
     ///
     /// Support for alternate usage modes
@@ -453,6 +457,9 @@ namespace swift {
     // FrontendOptions.
     bool AllowModuleWithCompilerErrors = false;
 
+    /// Enable using @_spiOnly on import decls.
+    bool EnableSPIOnlyImports = false;
+
     /// A helper enum to represent whether or not we customized the default
     /// ASTVerifier behavior via a frontend flag. By default, we do not
     /// customize.
@@ -523,6 +530,8 @@ namespace swift {
       return ActiveConcurrencyModel == ConcurrencyModel::TaskToThread;
     }
 
+    LangOptions();
+
     /// Sets the target we are building for and updates platform conditions
     /// to match.
     ///
@@ -535,15 +544,16 @@ namespace swift {
     /// This is only implemented on certain OSs. If no target has been
     /// configured, returns v0.0.0.
     llvm::VersionTuple getMinPlatformVersion() const {
-      unsigned major = 0, minor = 0, revision = 0;
       if (Target.isMacOSX()) {
-        Target.getMacOSXVersion(major, minor, revision);
+        llvm::VersionTuple OSVersion;
+        Target.getMacOSXVersion(OSVersion);
+        return OSVersion;
       } else if (Target.isiOS()) {
-        Target.getiOSVersion(major, minor, revision);
+        return Target.getiOSVersion();
       } else if (Target.isWatchOS()) {
-        Target.getOSVersion(major, minor, revision);
+        return Target.getOSVersion();
       }
-      return llvm::VersionTuple(major, minor, revision);
+      return llvm::VersionTuple(/*Major=*/0, /*Minor=*/0, /*Subminor=*/0);
     }
 
     /// Sets an implicit platform condition.

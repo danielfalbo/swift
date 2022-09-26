@@ -151,7 +151,7 @@ bool swift::isOverrideBasedOnType(const ValueDecl *decl, Type declTy,
   auto genericSig =
       decl->getInnermostDeclContext()->getGenericSignatureOfContext();
 
-  auto canDeclTy = declTy->getCanonicalType(genericSig);
+  auto canDeclTy = declTy->getReducedType(genericSig);
 
   auto declIUOAttr = decl->isImplicitlyUnwrappedOptional();
   auto parentDeclIUOAttr = parentDecl->isImplicitlyUnwrappedOptional();
@@ -198,7 +198,7 @@ bool swift::isOverrideBasedOnType(const ValueDecl *decl, Type declTy,
   if (parentDeclTy->hasError())
     return false;
 
-  auto canParentDeclTy = parentDeclTy->getCanonicalType(genericSig);
+  auto canParentDeclTy = parentDeclTy->getReducedType(genericSig);
 
   // If this is a constructor, let's compare only parameter types.
   if (isa<ConstructorDecl>(decl)) {
@@ -490,7 +490,8 @@ static bool noteFixableMismatchedTypes(ValueDecl *decl, const ValueDecl *base) {
     auto *fnType = baseTy->getAs<AnyFunctionType>();
     baseTy = fnType->getResult();
     Type argTy = FunctionType::composeTuple(
-        ctx, baseTy->getAs<AnyFunctionType>()->getParams());
+        ctx, baseTy->getAs<AnyFunctionType>()->getParams(),
+        ParameterFlagHandling::IgnoreNonEmpty);
     auto diagKind = diag::override_type_mismatch_with_fixits_init;
     unsigned numArgs = baseInit->getParameters()->size();
     return computeFixitsForOverriddenDeclaration(
@@ -1263,7 +1264,7 @@ bool OverrideMatcher::checkOverride(ValueDecl *baseDecl,
     auto parentPropertyTy = getSuperMemberDeclType(baseDecl);
 
     CanType parentPropertyCanTy =
-      parentPropertyTy->getCanonicalType(
+      parentPropertyTy->getReducedType(
         decl->getInnermostDeclContext()->getGenericSignatureOfContext());
     if (!propertyTy->matches(parentPropertyCanTy,
                              TypeMatchFlags::AllowOverride)) {
@@ -1490,6 +1491,7 @@ namespace  {
     UNINTERESTING_ATTR(Borrowed)
     UNINTERESTING_ATTR(CDecl)
     UNINTERESTING_ATTR(Consuming)
+    UNINTERESTING_ATTR(Documentation)
     UNINTERESTING_ATTR(Dynamic)
     UNINTERESTING_ATTR(DynamicCallable)
     UNINTERESTING_ATTR(DynamicMemberLookup)
@@ -1512,6 +1514,7 @@ namespace  {
     UNINTERESTING_ATTR(NoAllocation)
     UNINTERESTING_ATTR(Inlinable)
     UNINTERESTING_ATTR(Effects)
+    UNINTERESTING_ATTR(Expose)
     UNINTERESTING_ATTR(Final)
     UNINTERESTING_ATTR(MoveOnly)
     UNINTERESTING_ATTR(FixedLayout)
@@ -1580,8 +1583,11 @@ namespace  {
     UNINTERESTING_ATTR(Frozen)
     UNINTERESTING_ATTR(HasInitialValue)
     UNINTERESTING_ATTR(ImplementationOnly)
+    UNINTERESTING_ATTR(SPIOnly)
     UNINTERESTING_ATTR(Custom)
     UNINTERESTING_ATTR(PropertyWrapper)
+    UNINTERESTING_ATTR(TypeWrapper)
+    UNINTERESTING_ATTR(TypeWrapperIgnored)
     UNINTERESTING_ATTR(DisfavoredOverload)
     UNINTERESTING_ATTR(ResultBuilder)
     UNINTERESTING_ATTR(ProjectedValueProperty)
@@ -1605,6 +1611,7 @@ namespace  {
     UNINTERESTING_ATTR(UnavailableFromAsync)
 
     UNINTERESTING_ATTR(TypeSequence)
+    UNINTERESTING_ATTR(NoMetadata)
     UNINTERESTING_ATTR(CompileTimeConst)
 
     UNINTERESTING_ATTR(BackDeploy)
@@ -1612,6 +1619,10 @@ namespace  {
 
     UNINTERESTING_ATTR(UnsafeInheritExecutor)
     UNINTERESTING_ATTR(CompilerInitialized)
+    UNINTERESTING_ATTR(AlwaysEmitConformanceMetadata)
+
+    UNINTERESTING_ATTR(EagerMove)
+    UNINTERESTING_ATTR(NoEagerMove)
 #undef UNINTERESTING_ATTR
 
     void visitAvailableAttr(AvailableAttr *attr) {

@@ -33,7 +33,7 @@ static SmallString<128> getSwiftExecutablePath() {
   return path;
 }
 
-static void *createCancallationToken() {
+static void *createCancellationToken() {
   static std::atomic<size_t> handle(1000);
   return reinterpret_cast<void *>(
       handle.fetch_add(1, std::memory_order_relaxed));
@@ -424,8 +424,7 @@ TEST_F(CursorInfoTest, CursorInfoMustWaitDueTokenRace) {
   EXPECT_EQ(strlen("fog"), Info.Length);
 }
 
-// Disabled until we re-enable cancellation (rdar://91251055)
-TEST_F(CursorInfoTest, DISABLED_CursorInfoCancelsPreviousRequest) {
+TEST_F(CursorInfoTest, CursorInfoCancelsPreviousRequest) {
   // TODO: This test case relies on the following snippet being slow to type 
   // check so that the first cursor info request takes longer to execute than it 
   // takes time to schedule the second request. If that is fixed, we need to 
@@ -472,11 +471,10 @@ TEST_F(CursorInfoTest, DISABLED_CursorInfoCancelsPreviousRequest) {
 
   bool expired = FirstCursorInfoSema.wait(30 * 1000);
   if (expired)
-    llvm::report_fatal_error("Did not receive a resonse for the first request");
+    llvm::report_fatal_error("Did not receive a response for the first request");
 }
 
-// Disabled until we re-enable cancellation (rdar://91251055)
-TEST_F(CursorInfoTest, DISABLED_CursorInfoCancellation) {
+TEST_F(CursorInfoTest, CursorInfoCancellation) {
   // TODO: This test case relies on the following snippet being slow to type
   // check so that the first cursor info request takes longer to execute than it
   // takes time to schedule the second request. If that is fixed, we need to
@@ -492,7 +490,7 @@ TEST_F(CursorInfoTest, DISABLED_CursorInfoCancellation) {
 
   open(SlowDocName, SlowContents, llvm::makeArrayRef(Args));
 
-  SourceKitCancellationToken CancellationToken = createCancallationToken();
+  SourceKitCancellationToken CancellationToken = createCancellationToken();
 
   // Schedule a cursor info request that takes long to execute. This should be
   // cancelled as the next cursor info (which is faster) gets requested.
@@ -510,5 +508,5 @@ TEST_F(CursorInfoTest, DISABLED_CursorInfoCancellation) {
 
   bool expired = CursorInfoSema.wait(30 * 1000);
   if (expired)
-    llvm::report_fatal_error("Did not receive a resonse for the first request");
+    llvm::report_fatal_error("Did not receive a response for the first request");
 }

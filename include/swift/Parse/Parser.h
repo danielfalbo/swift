@@ -100,6 +100,16 @@ public:
   virtual ~ConsumeTokenReceiver() = default;
 };
 
+/// The role of the elements in a given #if
+enum class IfConfigElementsRole {
+  // Parse normally.
+  Normal,
+  // Parse, but only for syntax. Throw away the results.
+  SyntaxOnly,
+  // Already skipped; no need to parse anything.
+  Skipped
+};
+
 /// The main class used for parsing a source file (.swift or .sil).
 ///
 /// Rather than instantiating a Parser yourself, use one of the parsing APIs
@@ -684,7 +694,8 @@ public:
     while (Tok.isNot(K..., tok::eof, tok::r_brace, tok::pound_endif,
                      tok::pound_else, tok::pound_elseif,
                      tok::code_complete) &&
-           !isStartOfStmt() && !isStartOfSwiftDecl()) {
+           !isStartOfStmt() &&
+           !isStartOfSwiftDecl(/*allowPoundIfAttributes=*/true)) {
       skipSingle();
     }
   }
@@ -945,7 +956,7 @@ public:
   // Decl Parsing
 
   /// Returns true if parser is at the start of a Swift decl or decl-import.
-  bool isStartOfSwiftDecl();
+  bool isStartOfSwiftDecl(bool allowPoundIfAttributes = true);
 
   /// Returns true if the parser is at the start of a SIL decl.
   bool isStartOfSILDecl();
@@ -965,13 +976,12 @@ public:
     PD_AllowTopLevel        = 1 << 1,
     PD_HasContainerType     = 1 << 2,
     PD_DisallowInit         = 1 << 3,
-    PD_AllowDestructor      = 1 << 4,
-    PD_AllowEnumElement     = 1 << 5,
-    PD_InProtocol           = 1 << 6,
-    PD_InClass              = 1 << 7,
-    PD_InExtension          = 1 << 8,
-    PD_InStruct             = 1 << 9,
-    PD_InEnum               = 1 << 10,
+    PD_AllowEnumElement     = 1 << 4,
+    PD_InProtocol           = 1 << 5,
+    PD_InClass              = 1 << 6,
+    PD_InExtension          = 1 << 7,
+    PD_InStruct             = 1 << 8,
+    PD_InEnum               = 1 << 9,
   };
 
   /// Options that control the parsing of declarations.
@@ -982,6 +992,7 @@ public:
 
   ParserResult<Decl> parseDecl(ParseDeclOptions Flags,
                                bool IsAtStartOfLineOrPreviousHadSemi,
+                               bool IfConfigsAreDeclAttrs,
                                llvm::function_ref<void(Decl*)> Handler);
 
   std::pair<std::vector<Decl *>, Optional<Fingerprint>>
@@ -1004,11 +1015,28 @@ public:
 
   ParserResult<TypeDecl> parseDeclAssociatedType(ParseDeclOptions Flags,
                                                  DeclAttributes &Attributes);
-  
+
+  /// Parse a #if ... #endif directive.
+  /// Delegate callback function to parse elements in the blocks and record
+  /// them however they wish. The parsing function will be provided with the
+  /// location of the clause token (`#if`, `#else`, etc.), the condition,
+  /// whether this is the active clause, and the role of the elements.
+  template<typename Result>
+  Result parseIfConfigRaw(
+      llvm::function_ref<void(SourceLoc clauseLoc, Expr *condition,
+                              bool isActive, IfConfigElementsRole role)>
+          parseElements,
+      llvm::function_ref<Result(SourceLoc endLoc, bool hadMissingEnd)> finish);
+
   /// Parse a #if ... #endif directive.
   /// Delegate callback function to parse elements in the blocks.
   ParserResult<IfConfigDecl> parseIfConfig(
     llvm::function_ref<void(SmallVectorImpl<ASTNode> &, bool)> parseElements);
+
+  /// Parse an #if ... #endif containing only attributes.
+  ParserStatus parseIfConfigDeclAttributes(
+    DeclAttributes &attributes, bool ifConfigsAreDeclAttrs,
+    PatternBindingInitializer *initContext);
 
   /// Parse a #error or #warning diagnostic.
   ParserResult<PoundDiagnosticDecl> parseDeclPoundDiagnostic();
@@ -1020,8 +1048,26 @@ public:
   void setLocalDiscriminator(ValueDecl *D);
   void setLocalDiscriminatorToParamList(ParameterList *PL);
 
+  /// Skip an `#if` configuration block containing only attributes.
+  ///
+  /// \returns true if the skipping was successful, false otherwise.
+  bool skipIfConfigOfAttributes(bool &sawAnyAttributes);
+
+  /// Determine whether the `#if` at which the parser occurs only contains
+  /// attributes (in all branches), in which case it is treated as part of
+  /// an attribute list.
+  bool ifConfigContainsOnlyAttributes();
+
   /// Parse the optional attributes before a declaration.
-  ParserStatus parseDeclAttributeList(DeclAttributes &Attributes);
+  ParserStatus parseDeclAttributeList(DeclAttributes &Attributes,
+                                      bool IfConfigsAreDeclAttrs = false);
+
+  /// Parse the optional attributes before a declaration.
+  ///
+  /// This is the inner loop, which can be called recursively.
+  ParserStatus parseDeclAttributeList(DeclAttributes &Attributes,
+                                      bool IfConfigsAreDeclAttrs,
+                                      PatternBindingInitializer *initContext);
 
   /// Parse the optional modifiers before a declaration.
   bool parseDeclModifierList(DeclAttributes &Attributes, SourceLoc &StaticLoc,
@@ -1059,6 +1105,7 @@ public:
       AvailabilityContext *SILAvailability,
       SmallVectorImpl<Identifier> &spiGroups,
       SmallVectorImpl<AvailableAttr *> &availableAttrs,
+      size_t &typeErasedParamsCount,
       llvm::function_ref<bool(Parser &)> parseSILTargetName,
       llvm::function_ref<bool(Parser &)> parseSILSIPModule);
 
@@ -1097,6 +1144,14 @@ public:
   /// Parse the @_backDeploy attribute.
   bool parseBackDeployAttribute(DeclAttributes &Attributes, StringRef AttrName,
                                 SourceLoc AtLoc, SourceLoc Loc);
+
+  /// Parse the @_documentation attribute.
+  ParserResult<DocumentationAttr> parseDocumentationAttribute(SourceLoc AtLoc,
+                                                              SourceLoc Loc);
+
+  /// Parse a single argument from a @_documentation attribute.
+  bool parseDocumentationAttributeArgument(Optional<StringRef> &Metadata,
+                                           Optional<AccessLevel> &Visibility);
 
   /// Parse a specific attribute.
   ParserStatus parseDeclAttribute(DeclAttributes &Attributes, SourceLoc AtLoc,
@@ -1261,6 +1316,10 @@ public:
     CustomAttribute,
   };
 
+  ParserResult<TypeRepr> parseTypeScalar(
+      Diag<> MessageID,
+      ParseTypeReason reason);
+
   ParserResult<TypeRepr> parseType();
   ParserResult<TypeRepr> parseType(
       Diag<> MessageID,
@@ -1377,9 +1436,6 @@ public:
     ///
     /// \p SecondName is the name.
     SourceLoc SecondNameLoc;
-
-    /// The location of the '...', if present.
-    SourceLoc EllipsisLoc;
 
     /// The first name.
     Identifier FirstName;
@@ -1606,6 +1662,8 @@ public:
   ParserResult<Expr> parseExprRegexLiteral();
 
   StringRef copyAndStripUnderscores(StringRef text);
+  StringRef stripUnderscoresIfNeeded(StringRef text,
+                                     SmallVectorImpl<char> &buffer);
 
   ParserStatus parseStringSegments(SmallVectorImpl<Lexer::StringSegment> &Segments,
                                    Token EntireTok,
@@ -1781,6 +1839,7 @@ public:
   ParserStatus parseStmtCondition(StmtCondition &Result, Diag<> ID,
                                   StmtKind ParentKind);
   ParserResult<PoundAvailableInfo> parseStmtConditionPoundAvailable();
+  ParserResult<PoundHasSymbolInfo> parseStmtConditionPoundHasSymbol();
   ParserResult<Stmt> parseStmtIf(LabeledStmtInfo LabelInfo,
                                  bool IfWasImplicitlyInserted = false);
   ParserResult<Stmt> parseStmtGuard();
