@@ -726,3 +726,46 @@ class Base {
 class Derived: Base {
   override func method<T: P3>(_: T) {}
 }
+
+
+// SR-15176
+
+// Method tries to override property
+class Square {
+  var perimeter: Double
+  var sideLength: Double
+
+  init(sideLength: Double) {
+    self.sideLength = sideLength
+    self.perimeter = 4.0 * sideLength
+  }
+}
+
+class SmartSquare: Square {
+  override func perimeter() -> Double {} // expected-note {{did you mean to override as computed property?}}
+}
+
+// Computed property tries to override method
+class AnotherSquare {
+  var sideLength: Double
+
+  func perimeter() -> Double {
+    return self.sideLength * 4.0
+  }
+
+  init(sideLength: Double) {
+    self.sideLength = sideLength
+  }
+}
+
+class AnotherSmartSquare: AnotherSquare {
+  override var perimeter: Double { // expected-note {{did you mean to override as method?}}
+    get {
+      return self.sideLength * 4.0
+    }
+
+    set {
+      self.sideLength = newValue / 4.0
+    }
+  }
+}
